@@ -33,11 +33,32 @@ if [[ -d "$REPO_ROOT/specs" ]]; then
   for d in "$REPO_ROOT"/specs/*/; do
     [[ -d "$d" ]] || continue
     name=$(basename "$d")
-    if [[ -f "$d/tasks.md" ]];      then status="IN PROGRESS (has tasks.md)"
-    elif [[ -f "$d/plan.md" ]];     then status="planned"
-    else                                 status="backlog"
+
+    # Read the spec's OWN declared status rather than inferring it from which files exist.
+    # Inferring "has tasks.md => in progress" is wrong the moment a spec is finished, and it
+    # reported spec 001 as IN PROGRESS and spec 000 as backlog when both were complete.
+    # A status line that lies is worse than no status line.
+    status=""
+    if [[ -f "$d/spec.md" ]]; then
+      line=$(grep -m1 '^\*\*Status:\*\*' "$d/spec.md" 2>/dev/null || true)
+      case "$line" in
+        *COMPLETE*)     status="COMPLETE" ;;
+        *"IN PROGRESS"*) status="IN PROGRESS" ;;
+        *DEFERRED*)     status="DEFERRED (optional; nothing may depend on it)" ;;
+        *BACKLOG*)      status="backlog" ;;
+      esac
     fi
-    printf '  %-32s %s\n' "$name" "$status"
+
+    if [[ -z "$status" ]]; then
+      status="backlog (no status line in spec.md)"
+    fi
+
+    # Note whether the HOW/STEPS artifacts exist -- they are written when a spec is picked up.
+    extra=""
+    [[ -f "$d/plan.md"  ]] && extra="${extra} +plan"
+    [[ -f "$d/tasks.md" ]] && extra="${extra} +tasks"
+
+    printf '  %-32s %s%s\n' "$name" "$status" "$extra"
   done
   echo ""
 fi

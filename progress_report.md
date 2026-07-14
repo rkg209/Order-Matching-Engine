@@ -292,3 +292,31 @@ in the matching logic. That is worth sitting with: the engine was essentially ri
 telling me the engine was right were wrong. This is precisely why Principle 6 demands a latency harness
 from day one — not because there was anything to optimize in Spec 001, but because a measurement
 apparatus that has never been challenged is an apparatus you cannot trust when it finally matters.
+
+---
+
+## [006] 2026-07-14 — Fix the session-start hook reporting false spec status
+
+**What:** `.claude/scripts/inject-context.sh` now reads each spec's **declared** `**Status:**` line
+from its `spec.md`, instead of guessing from which files happen to exist. It also flags the two
+deferred specs explicitly and notes whether `plan.md`/`tasks.md` are present.
+
+**Why:** The hook was reporting **`001-core-order-book — IN PROGRESS`** and
+**`000-constitution — backlog`** at session start, when both are complete. Its rule was "has
+`tasks.md` ⇒ in progress", which is true exactly until a spec is *finished* — at which point the
+artifact that proves the work was done becomes the evidence it is still ongoing. It also had no way to
+represent COMPLETE or DEFERRED at all, so specs 012/013 looked like ordinary backlog items rather than
+work that is explicitly optional and that nothing may depend on.
+
+This is injected into the context of **every future session**. A status line that lies is worse than no
+status line, because it is trusted: the next session would have started by re-opening finished work,
+or by treating a deferred, CON-8-violating spec as a normal next step.
+
+**How:** Parse the `**Status:**` line each spec already carries (`COMPLETE` / `IN PROGRESS` /
+`BACKLOG` / `DEFERRED`) and report that, falling back to `backlog (no status line in spec.md)` when a
+spec has none — so a missing status is visible rather than silently defaulting to something plausible.
+The single source of truth for a spec's state is now the spec itself, which is where it belongs.
+
+**Issues:** Caught only because a stale background-task notification happened to reprint the
+session-start context, making the wrong output visible. Worth noting: the tooling built to enforce
+correctness is not itself exempt from being wrong, and nothing was checking it.
