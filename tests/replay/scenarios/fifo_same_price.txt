@@ -1,0 +1,5 @@
+# Three sells at one price; the aggressor must fill them in arrival order.
+NEW 1 SELL 100.00 10 1
+NEW 2 SELL 100.00 10 2
+NEW 3 SELL 100.00 10 3
+NEW 4 BUY  100.00 25 4

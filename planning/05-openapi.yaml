@@ -1,0 +1,985 @@
+```yaml
+openapi: 3.0.3
+info:
+  title: Velox Matching Engine REST API
+  description: |
+    Administrative and operational REST API for the Velox Matching Engine.
+
+    This API covers off-hot-path concerns only: participant management,
+    instrument configuration, credential management, risk limits, trading
+    session management, audit queries, trade history, execution report
+    retrieval, journal/snapshot operational metadata, and system telemetry.
+
+    The matching engine hot path is accessed exclusively via the binary TCP
+    protocol on port 9001. This REST API never touches the matching engine
+    thread or any Tier 1 in-memory state.
+
+    All prices are encoded as 64-bit integers representing price × 10,000
+    (four implied decimal places). A price of $1.2345 is represented as 12345.
+    All quantities are 64-bit integers representing shares or contracts.
+
+    ## Authentication
+    All endpoints require a Bearer token issued by the `/v1/auth/token` endpoint.
+    Administrative endpoints additionally require the `admin` scope.
+    Read-only query endpoints require the `read` scope.
+
+    ## Versioning
+    The API is versioned via the URL path prefix `/v1`. Breaking changes will
+    increment the version number.
+
+    ## Pagination
+    Collection endpoints support cursor-based pagination via `after` and `limit`
+    query parameters. Responses include a `pagination` envelope with `next_cursor`
+    and `has_more` fields.
+
+    ## Error Responses
+    All errors return a standard `ErrorResponse` object with a machine-readable
+    `code` field and a human-readable `message` field.
+  version: 1.0.0
+  contact:
+    name: Velox Engineering
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080/v1
+    description: Local development
+  - url: https://velox.example.com/v1
+    description: Production
+
+tags:
+  - name: Authentication
+    description: Token issuance and revocation
+  - name: Participants
+    description: Participant (firm/trader) management
+  - name: Credentials
+    description: Gateway session credential management
+  - name: Instruments
+    description: Tradeable instrument configuration
+  - name: TradingSessions
+    description: Named trading session windows per instrument
+  - name: RiskLimits
+    description: Pre-trade risk limit configuration
+  - name: Orders
+    description: Order audit record queries
+  - name: Trades
+    description: Trade history queries
+  - name: ExecutionReports
+    description: Execution report history queries
+  - name: Journal
+    description: Journal segment operational metadata
+  - name: Snapshots
+    description: Engine snapshot operational metadata
+  - name: AuditEvents
+    description: Immutable system audit log queries
+  - name: Telemetry
+    description: Live engine telemetry and latency statistics
+  - name: System
+    description: Engine lifecycle and health
+
+security:
+  - BearerAuth: []
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # Authentication
+  # ---------------------------------------------------------------------------
+
+  /auth/token:
+    post:
+      operationId: issueToken
+      tags: [Authentication]
+      summary: Issue an API access token
+      description: |
+        Authenticates an administrative user and returns a short-lived Bearer
+        token for use with all other API endpoints. This endpoint does not
+        require a prior Bearer token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '200':
+          description: Token issued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /auth/token/revoke:
+    post:
+      operationId: revokeToken
+      tags: [Authentication]
+      summary: Revoke the current Bearer token
+      description: Immediately invalidates the token presented in the Authorization header.
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Participants
+  # ---------------------------------------------------------------------------
+
+  /participants:
+    get:
+      operationId: listParticipants
+      tags: [Participants]
+      summary: List participants
+      description: Returns a paginated list of all participants ordered by participant_id ascending.
+      security:
+        - BearerAuth: [admin, read]
+      parameters:
+        - $ref: '#/components/parameters/AfterCursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          description: Filter by participant status
+          schema:
+            $ref: '#/components/schemas/ParticipantStatus'
+        - name: participant_type
+          in: query
+          description: Filter by participant type
+          schema:
+            $ref: '#/components/schemas/ParticipantType'
+      responses:
+        '200':
+          description: Paginated list of participants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      operationId: createParticipant
+      tags: [Participants]
+      summary: Create a participant
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateParticipantRequest'
+      responses:
+        '201':
+          description: Participant created
+          headers:
+            Location:
+              description: URL of the created participant
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Participant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /participants/{participantId}:
+    parameters:
+      - $ref: '#/components/parameters/ParticipantId'
+    get:
+      operationId: getParticipant
+      tags: [Participants]
+      summary: Get a participant by ID
+      security:
+        - BearerAuth: [admin, read]
+      responses:
+        '200':
+          description: Participant record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Participant'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    patch:
+      operationId: updateParticipant
+      tags: [Participants]
+      summary: Update a participant
+      description: |
+        Partial update. Only fields present in the request body are modified.
+        `participant_id` and `created_at` are immutable.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateParticipantRequest'
+      responses:
+        '200':
+          description: Updated participant record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Participant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      operationId: deleteParticipant
+      tags: [Participants]
+      summary: Terminate a participant
+      description: |
+        Sets the participant status to TERMINATED. Does not physically delete
+        the row. All associated credentials are revoked. Active orders are
+        not automatically cancelled — the operator must cancel them via the
+        gateway before terminating the participant.
+      security:
+        - BearerAuth: [admin]
+      responses:
+        '200':
+          description: Participant terminated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Participant'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Participant already terminated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Credentials
+  # ---------------------------------------------------------------------------
+
+  /participants/{participantId}/credentials:
+    parameters:
+      - $ref: '#/components/parameters/ParticipantId'
+    get:
+      operationId: listCredentials
+      tags: [Credentials]
+      summary: List credentials for a participant
+      security:
+        - BearerAuth: [admin]
+      parameters:
+        - $ref: '#/components/parameters/AfterCursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/CredentialStatus'
+      responses:
+        '200':
+          description: Paginated list of credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      operationId: createCredential
+      tags: [Credentials]
+      summary: Create a gateway session credential
+      description: |
+        Generates a new session token for the participant. The raw token is
+        returned exactly once in this response and is never stored. The system
+        stores only SHA-256(salt || token). The caller must securely deliver
+        the token to the participant.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCredentialRequest'
+      responses:
+        '201':
+          description: Credential created. Raw token returned once only.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateCredentialResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /participants/{participantId}/credentials/{credentialId}:
+    parameters:
+      - $ref: '#/components/parameters/ParticipantId'
+      - $ref: '#/components/parameters/CredentialId'
+    get:
+      operationId: getCredential
+      tags: [Credentials]
+      summary: Get credential metadata
+      description: Returns credential metadata. The raw token and hash are never returned.
+      security:
+        - BearerAuth: [admin]
+      responses:
+        '200':
+          description: Credential metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Credential'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      operationId: revokeCredential
+      tags: [Credentials]
+      summary: Revoke a credential
+      description: |
+        Sets the credential status to REVOKED and records `revoked_at`.
+        Any active gateway session using this credential will be disconnected
+        on its next heartbeat check.
+      security:
+        - BearerAuth: [admin]
+      responses:
+        '200':
+          description: Credential revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Credential'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Credential already revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Instruments
+  # ---------------------------------------------------------------------------
+
+  /instruments:
+    get:
+      operationId: listInstruments
+      tags: [Instruments]
+      summary: List instruments
+      security:
+        - BearerAuth: [admin, read]
+      parameters:
+        - $ref: '#/components/parameters/AfterCursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: trading_state
+          in: query
+          schema:
+            $ref: '#/components/schemas/TradingState'
+        - name: instrument_type
+          in: query
+          schema:
+            $ref: '#/components/schemas/InstrumentType'
+      responses:
+        '200':
+          description: Paginated list of instruments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstrumentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      operationId: createInstrument
+      tags: [Instruments]
+      summary: Create an instrument
+      description: |
+        Creates a new tradeable instrument. The instrument will be in CLOSED
+        trading state until explicitly opened via a trading session. The
+        matching engine's in-memory instrument cache is refreshed on the next
+        engine restart or via the hot-reload signal endpoint.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInstrumentRequest'
+      responses:
+        '201':
+          description: Instrument created
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instrument'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /instruments/{instrumentId}:
+    parameters:
+      - $ref: '#/components/parameters/InstrumentId'
+    get:
+      operationId: getInstrument
+      tags: [Instruments]
+      summary: Get an instrument by ID
+      security:
+        - BearerAuth: [admin, read]
+      responses:
+        '200':
+          description: Instrument record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instrument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    patch:
+      operationId: updateInstrument
+      tags: [Instruments]
+      summary: Update an instrument
+      description: |
+        Partial update. `instrument_id`, `symbol`, and `created_at` are
+        immutable. Changes to `tick_size` or `lot_size` take effect on the
+        next engine restart. Changes to `trading_state` are reflected
+        immediately in the gateway's cached instrument table.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInstrumentRequest'
+      responses:
+        '200':
+          description: Updated instrument record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instrument'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /instruments/{instrumentId}/halt:
+    parameters:
+      - $ref: '#/components/parameters/InstrumentId'
+    post:
+      operationId: haltInstrument
+      tags: [Instruments]
+      summary: Halt trading on an instrument
+      description: |
+        Sets `trading_state` to HALTED. The gateway will reject new orders
+        for this instrument immediately. Resting orders are not automatically
+        cancelled. An audit event of type INSTRUMENT_HALTED is written.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HaltInstrumentRequest'
+      responses:
+        '200':
+          description: Instrument halted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instrument'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Instrument is already halted or closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /instruments/{instrumentId}/resume:
+    parameters:
+      - $ref: '#/components/parameters/InstrumentId'
+    post:
+      operationId: resumeInstrument
+      tags: [Instruments]
+      summary: Resume trading on a halted instrument
+      description: |
+        Sets `trading_state` to OPEN. Only valid when current state is HALTED.
+        An audit event of type INSTRUMENT_RESUMED is written.
+      security:
+        - BearerAuth: [admin]
+      responses:
+        '200':
+          description: Instrument resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instrument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Instrument is not in HALTED state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Trading Sessions
+  # ---------------------------------------------------------------------------
+
+  /instruments/{instrumentId}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/InstrumentId'
+    get:
+      operationId: listTradingSessions
+      tags: [TradingSessions]
+      summary: List trading sessions for an instrument
+      security:
+        - BearerAuth: [admin, read]
+      parameters:
+        - $ref: '#/components/parameters/AfterCursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: session_date
+          in: query
+          description: Filter by session date (ISO 8601 date)
+          schema:
+            type: string
+            format: date
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TradingSessionStatus'
+      responses:
+        '200':
+          description: Paginated list of trading sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingSessionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      operationId: createTradingSession
+      tags: [TradingSessions]
+      summary: Create a trading session
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTradingSessionRequest'
+      responses:
+        '201':
+          description: Trading session created
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingSession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /instruments/{instrumentId}/sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/InstrumentId'
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      operationId: getTradingSession
+      tags: [TradingSessions]
+      summary: Get a trading session by ID
+      security:
+        - BearerAuth: [admin, read]
+      responses:
+        '200':
+          description: Trading session record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    patch:
+      operationId: updateTradingSession
+      tags: [TradingSessions]
+      summary: Update a trading session
+      description: |
+        Partial update. Only SCHEDULED sessions may be updated.
+        `session_id`, `instrument_id`, and `created_at` are immutable.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTradingSessionRequest'
+      responses:
+        '200':
+          description: Updated trading session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingSession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Session is not in SCHEDULED state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      operationId: cancelTradingSession
+      tags: [TradingSessions]
+      summary: Cancel a scheduled trading session
+      description: Sets status to CANCELLED. Only SCHEDULED sessions may be cancelled.
+      security:
+        - BearerAuth: [admin]
+      responses:
+        '200':
+          description: Session cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Session is not in SCHEDULED state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ---------------------------------------------------------------------------
+  # Risk Limits
+  # ---------------------------------------------------------------------------
+
+  /participants/{participantId}/risk-limits:
+    parameters:
+      - $ref: '#/components/parameters/ParticipantId'
+    get:
+      operationId: listRiskLimits
+      tags: [RiskLimits]
+      summary: List risk limits for a participant
+      security:
+        - BearerAuth: [admin, read]
+      parameters:
+        - $ref: '#/components/parameters/AfterCursor'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: instrument_id
+          in: query
+          description: Filter by instrument. Omit to include cross-instrument limits.
+          schema:
+            type: integer
+            format: int32
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RiskLimitStatus'
+      responses:
+        '200':
+          description: Paginated list of risk limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskLimitPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      operationId: createRiskLimit
+      tags: [RiskLimits]
+      summary: Create a risk limit
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRiskLimitRequest'
+      responses:
+        '201':
+          description: Risk limit created
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskLimit'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /participants/{participantId}/risk-limits/{riskLimitId}:
+    parameters:
+      - $ref: '#/components/parameters/ParticipantId'
+      - $ref: '#/components/parameters/RiskLimitId'
+    get:
+      operationId: getRiskLimit
+      tags: [RiskLimits]
+      summary: Get a risk limit by ID
+      security:
+        - BearerAuth: [admin, read]
+      responses:
+        '200':
+          description: Risk limit record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskLimit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    patch:
+      operationId: updateRiskLimit
+      tags: [RiskLimits]
+      summary: Update a risk limit
+      description: |
+        Partial update. `risk_limit_id`, `participant_id`, `instrument_id`,
+        `limit_type`, and `created_at` are immutable. Only `limit_value`
+        and `status` may be changed.
+      security:
+        - BearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRiskLimitRequest'
+      responses:
+        '200':
+          description: Updated risk limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskLimit'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      operationId: deleteRiskLimit
+      tags: [RiskLimits]
+      summary: Delete a risk limit
+      description: Permanently removes the risk limit. This action cannot be undone.
+      security:
+        - BearerAuth: [admin]
+      responses:
+        '204':
+          description: Risk limit deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':

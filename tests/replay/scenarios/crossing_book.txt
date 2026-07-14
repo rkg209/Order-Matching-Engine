@@ -1,0 +1,7 @@
+# Both sides build up, then aggressors cross in from each direction.
+NEW 1 BUY  99.00  20 1
+NEW 2 BUY  98.00  20 1
+NEW 3 SELL 101.00 20 2
+NEW 4 SELL 102.00 20 2
+NEW 5 BUY  101.00 30 3
+NEW 6 SELL 98.00  50 4

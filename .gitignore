@@ -1,0 +1,27 @@
+# Build
+build/
+cmake-build-*/
+_deps/
+
+# Runtime artifacts
+journal/
+snapshots/
+*.bin
+!tests/replay/golden/*.bin
+
+# Benchmark output (baselines ARE committed; raw runs are not)
+benchmarks/runs/
+benchmarks/plots/*.png
+
+# Frontend
+node_modules/
+dist/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json
+
+# Claude Code local overrides
+.claude/settings.local.json

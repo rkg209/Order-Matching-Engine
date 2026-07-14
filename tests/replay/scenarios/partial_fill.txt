@@ -1,0 +1,3 @@
+# Aggressor wants more than is available: takes what there is, rests the remainder on its side.
+NEW 1 SELL 100.00 30 1
+NEW 2 BUY  100.00 50 2

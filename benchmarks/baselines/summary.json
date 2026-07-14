@@ -1,0 +1,53 @@
+{
+  "_README": "The regression gate. A >20% p99 regression vs this is a HARD BUILD FAILURE (constitution Principle 1). Modified ONLY by the deliberate /perf-baseline command (DR-7) -- never automatically, and never as a side effect of a change that made things slower. A gate that absorbs whatever the code does is not a gate.",
+
+  "scenario": "steady_limit_orders",
+  "spec": "001-core-order-book",
+  "measured_at": "2026-07-14",
+
+  "p50_ns": 11,
+  "p99_ns": 14,
+  "p999_ns": 18,
+  "max_ns": 279,
+
+  "throughput_ops_sec": 85608400,
+
+  "sample_count": 2000000,
+  "batch_size": 64,
+
+  "budgets": {
+    "p50_ns": 2000,
+    "p99_ns": 20000,
+    "p999_ns": 100000,
+    "throughput_ops_sec": 1000000,
+    "p99_regression_pct": 20
+  },
+
+  "durable": false,
+  "end_to_end": false,
+  "mode": "in-process",
+
+  "hardware_ref": "benchmarks/baselines/hardware.md",
+  "hardware_summary": "Apple M4, 10 cores (4P+6E), 16GB, macOS 26.5.2 arm64, Apple clang 21.0.0, -O3 -DNDEBUG",
+  "core_isolation": false,
+
+  "caveats": [
+    "NOT END-TO-END. This measures the matching call in isolation -- no journal, no gateway, no ring buffer. It is not comparable to an end-to-end figure and must never be presented as one. The end-to-end number arrives with Spec 009.",
+    "NOT DURABLE. No journal is in this path. When the >=1M orders/sec throughput headline is produced in Spec 009 it will also be a no-durability number, because fsync costs tens of microseconds and a million per second is physically impossible on any storage device. That caveat is permanent.",
+    "NO CORE ISOLATION. macOS provides no taskset/numactl/SCHED_FIFO equivalent, so the matching thread shares a core with the OS. The tail (p99/p999/max) therefore includes scheduling noise and is a pessimistic bound, not the engine's true tail.",
+    "CLOCK GRANULARITY IS ~41ns, which is COARSER THAN A SINGLE submit() CALL (~11ns). Per-call timing is therefore unresolvable on this platform and would report a meaningless quantized distribution. These figures are measured over batches of 64 orders and divided. Cross-validated against Google Benchmark (11.7 ns/op) -- the two instruments agree, which is why these numbers are trusted.",
+    "COORDINATED OMISSION does not apply to this straight-line loop (CO is a property of rate-driven measurement). It becomes a real hazard with the load generator in Spec 009, where hdr_record_corrected_value() becomes mandatory. Do not read this baseline as evidence that CO has been handled -- it is merely absent."
+  ],
+
+  "allocation": {
+    "bytes_per_op": 0,
+    "allocs_per_op": 0,
+    "budget_bytes_per_op": 0
+  },
+
+  "correctness": {
+    "unit_tests": 44,
+    "golden_replay_scenarios": 7,
+    "all_passing": true
+  }
+}

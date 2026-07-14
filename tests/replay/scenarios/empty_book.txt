@@ -1,0 +1,3 @@
+# Orders into an empty book must rest, never trade against the sentinel.
+NEW 1 BUY  100.00 10 1
+NEW 2 SELL 105.00 10 2

@@ -1,0 +1,5 @@
+TRADE 0 agg=5 pass=3 px=1010000 qty=20
+TRADE 1 agg=6 pass=5 px=1010000 qty=10
+TRADE 2 agg=6 pass=1 px=990000 qty=20
+TRADE 3 agg=6 pass=2 px=980000 qty=20
+BOOK bestBid=-9223372036854775808 bestAsk=1020000 resting=1

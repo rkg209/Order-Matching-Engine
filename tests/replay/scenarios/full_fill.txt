@@ -1,0 +1,5 @@
+# Aggressor sweeps several levels and is fully filled; the book is left empty.
+NEW 1 SELL 100.00 10 1
+NEW 2 SELL 101.00 10 1
+NEW 3 SELL 102.00 10 1
+NEW 4 BUY  102.00 30 2

@@ -1,0 +1,13 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -3
+AllowShortFunctionsOnASingleLine: Inline
+AlwaysBreakTemplateDeclarations: Yes
+DerivePointerAlignment: false
+PointerAlignment: Left
+SpaceAfterTemplateKeyword: false
+IncludeBlocks: Preserve

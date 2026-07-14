@@ -1,0 +1,4 @@
+# Buyer is willing to pay 105 but the resting ask is 100: the trade prints at 100.
+# The price improvement accrues to the aggressor.
+NEW 1 SELL 100.00 40 1
+NEW 2 BUY  105.00 40 2

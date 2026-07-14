@@ -1,0 +1,4 @@
+# A resting sell, then a buy that lifts it exactly.
+# NEW <id> <BUY|SELL> <price> <qty> <participant>
+NEW 1 SELL 100.00 50 1
+NEW 2 BUY  100.00 50 2
