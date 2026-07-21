@@ -47,17 +47,17 @@ Prices are **scaled `int64_t`** (price × 10,000). No floating point.
 
 ## Definition of Done
 
-- [ ] A known order sequence replays to a **byte-identical** golden trade output (FR-47).
-- [ ] The golden scenarios for this slice pass: **limit match · partial fill · full fill · crossing
+- [x] A known order sequence replays to a **byte-identical** golden trade output (FR-47).
+- [x] The golden scenarios for this slice pass: **limit match · partial fill · full fill · crossing
       book · empty book · FIFO within a level · price improvement**.
-- [ ] Unit tests cover the price level (FIFO enqueue/unlink), the level maps (best-price tracking,
+- [x] Unit tests cover the price level (FIFO enqueue/unlink), the level maps (best-price tracking,
       sentinels), and the id map.
-- [ ] `./build/benchmark/velox_bench` prints a **real** p50/p99/p999 for the matching call, measured
+- [x] `./build/benchmark/velox_bench` prints a **real** p50/p99/p999 for the matching call, measured
       with HdrHistogram. The number is *recorded*, not assumed — even if it is bad. A bad first number
       is fine; an unknown one is not.
-- [ ] `benchmarks/baselines/hardware.md` states the actual machine, and says plainly that macOS-arm64
+- [x] `benchmarks/baselines/hardware.md` states the actual machine, and says plainly that macOS-arm64
       offers **no core isolation**.
-- [ ] `progress_report.md` has an entry with the real measured numbers.
+- [x] `progress_report.md` has an entry with the real measured numbers.
 
 ## Requirements satisfied
 

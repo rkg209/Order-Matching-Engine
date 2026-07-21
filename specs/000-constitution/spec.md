@@ -46,7 +46,7 @@ non-negotiables are only real if something other than memory enforces them.
 - [x] The Bash guard **actually blocks** a `git commit` carrying a `Co-Authored-By` trailer, and
       **fails closed** on a malformed payload rather than waving it through.
 - [x] The backlog exists, with every spec's scope and DoD stated.
-- [ ] A minimal Google Benchmark + HdrHistogram latency harness is scaffolded — *lands with Spec 001,
+- [x] A minimal Google Benchmark + HdrHistogram latency harness is scaffolded — *landed with Spec 001,
       because there is nothing to measure until there is a matching call to measure.*
 
 ## Requirements satisfied

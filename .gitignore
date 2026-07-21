@@ -23,5 +23,11 @@ dist/
 .idea/
 compile_commands.json
 
-# Claude Code local overrides
-.claude/settings.local.json
+# Claude Code configuration and local settings
+.claude/
+CLAUDE.md
+.specify/
+specs/
+planning/
+order-matching-engine-spec.md
+progress_report.md
