@@ -456,3 +456,90 @@ hypothetical ones:
 Verified: all 98 tests green (63 unit + 21 replay + 14 invariant, including the hand-written
 sanity test and the same-seed-same-trade-digest determinism test), `velox_alloc_check` at 0
 bytes/op, `VELOX_SCHEDULES=2000` long soak green across all ten profiles.
+
+## [009] 2026-07-21 — Implement Spec 004: close the zero-alloc proof holes, fix the real p999 defect
+
+**What:** Per `.claude/plans/004-zero-alloc-hot-path.md`:
+
+- **T0:** Added `BM_SweepThinBook` (`benchmark/velox_bench.cpp`) and a matching HdrHistogram pass
+  (`reportThinBookLatencyDistribution()`) — a book with real depth at only ~20 widely-spaced
+  ($5 apart) prices, so emptying the best level forces a genuine gap walk instead of the dense
+  benchmarks' always-adjacent-level case.
+- **T1:** `benchmark/velox_alloc_check.cpp` now overrides the *aligned* `operator new`/`delete`
+  overloads too (an over-aligned allocation previously escaped the counter entirely), and its
+  workload was widened from limit-submit-only to a 6-op cycle covering LIMIT rest, LIMIT cross,
+  `cancel()`, `replace()`, MARKET, and IOC/FOK — every Spec 002 path, at steady state. Added
+  `tests/structural/no_exceptions_tu.cpp` (compiles every `engine/`/`book/` header against
+  `-fno-exceptions -fno-rtti`) and `tests/structural/hot_path_grep_test.py` (fails on `new `,
+  `malloc`, `std::mutex`, `virtual`, `throw`, `std::vector`, etc. anywhere in `engine/`/`book/`,
+  comment-stripped, with an exact-line-content allow-list for the legitimate startup
+  `std::make_unique` sites). Both wired into `ctest -L unit`.
+- **T2:** `engine/order.hpp`: reordered `Order`'s fields — hot (`remaining`, `participant`,
+  `price`, `id`, `next`, `level`, `side`) first, cold (`quantity`, `seq`, `prev`) after — and
+  tightened `static_assert(sizeof(Order) <= 96)` to `<= 80` (the actual, exact size; not loosened
+  for headroom).
+- **T3 (the main change):** Replaced `LevelMap::nextOccupied()`'s linear scan
+  (`book/level_map.hpp`) with a two-level occupancy bitset (`l0_`: one bit per price slot; `l1_`:
+  one bit per `l0_` word), both allocated once at construction alongside `levels_`.
+  `addOrder()` sets a bit on the empty→non-empty transition; `onLevelEmptied()` now
+  unconditionally clears the bit for its slot (it is only ever called immediately after a level
+  became empty — verified all three call sites in `order_book.cpp`, the STP path, the main
+  `matchInto()` drain loop, and `cancel()`, are already gated on `level->empty()`) and only
+  recomputes `best_` when the emptied slot was the tracked best. `findSetBitBelow()`/
+  `findSetBitAbove()` walk the hierarchy with `std::countl_zero`/`std::countr_zero`. Added a
+  debug-only (`#ifndef NDEBUG`) cross-check against `PriceLevel::empty()` in
+  `setOccupied()`/`clearOccupied()`, a new public `occupiedBit()` introspection accessor, a new
+  **I9.OccupancyBitsetConsistency** invariant (`tests/invariant/invariants.hpp`) checked after
+  every op across all twelve randomized schedule profiles, and new `level_map_test.cpp` cases for
+  gapped walks in both directions and at both range ends.
+- **T4:** New `common/cache.hpp` (`kCacheLineSize`, `CachePadded<T>`, unit-tested) for Spec 005's
+  SPSC ring to consume — no hot-path counters added, per the decision recorded in the plan.
+  `OrderBook`'s constructor now rounds `idMap_`'s capacity up to the next power of two
+  (`std::bit_width`-based `nextPowerOfTwo()`) instead of assuming `maxOrders * 2` already is one —
+  previously a non-power-of-two `maxOrders` would silently corrupt `OrderIdMap`'s mask-based
+  probing. Also added a startup-only `platform::prefaultPages()` call (honest no-op on macOS,
+  real on Linux).
+
+**Why:** Satisfies `specs/004-zero-alloc-hot-path/spec.md`: prove 0 bytes/op structurally rather
+than by discipline, close the two proof holes identified while reading the code (aligned-new
+blind spot, limit-only workload), and fix the one real tail-latency defect found — a full
+`~20k`-slot linear scan inside `onLevelEmptied()`/`availableAgainst()` on any book thin or gapped
+enough that the next occupied level isn't adjacent.
+
+**How:** Followed the plan's "measure → change one thing → measure" order strictly: T0's
+benchmark first (so T3 would be measurable at all), then the cheap proof-hole closures (T1),
+then the pure reorder (T2), then the one substantive algorithmic change (T3), then the
+non-hot-path hardening (T4). Ran `latency-reviewer` after both `engine/order.hpp` and
+`book/level_map.hpp` (clean both times — no allocation, exception, lock, or virtual dispatch
+introduced; confirmed the debug asserts are genuinely `NDEBUG`-gated) and a `correctness-verifier`
+pass on the bitset specifically, which additionally wrote an adversarial standalone harness
+exercising `numSlots_ == 1/64/65`, `idx == 0`/`idx == numSlots_-1`, repeated same-price
+empty→refill cycles, and a scattered 50-level book drained top-down with a bitset-vs-`empty()`
+cross-check after every step — all passed, no bug found. Rejected leaving the aligned-new gap
+"since nothing over-aligned exists today" — the whole point of a structural proof is that it
+still holds after someone adds something that does.
+
+**Before/after** (macOS-arm64, no core isolation — see caveats in `/bench` output; three repeat
+runs each, batched-HdrHistogram method):
+
+| Scenario | p50 | p99 | p999 | max |
+|---|---|---|---|---|
+| Dense steady-state (existing `BM_SubmitRestingOrder`/Hdr pass) — before | 13 ns | 15 ns | 18 ns | — |
+| Dense steady-state — after | 13-14 ns | 16 ns | 18-19 ns | 85-403 ns |
+| Thin/gapped book (new `BM_SweepThinBook`/Hdr pass) — before | 80 ns | 90 ns | 151 ns | 194 ns |
+| Thin/gapped book — after | 14 ns | 21-25 ns | 28-130 ns | 31-215 ns |
+
+Honestly: the dense scenario shows **no measurable change**, exactly as predicted — it never hit
+the linear scan, so there was nothing for the bitset to fix there, and it stays within the
+committed baseline's p50 11 / p99 14 / p999 18 ns (well under the 20% regression gate). The thin
+book scenario improved **p50 by ~6x and p99 by ~3.5-4x**; p999/max remain noisy run-to-run
+(no core isolation on this dev machine, load average 2-3.5 throughout from concurrent tool use in
+this session) but are consistently and substantially below the pre-change numbers across every
+run measured. `summary.json` was **not** touched — these numbers are reported here, not promoted,
+pending a deliberate `/perf-baseline` run on a quieter machine.
+
+Verified: all 21 replay tests byte-identical (`git status` confirms zero golden files touched),
+72 unit tests green (65 prior + `Structural.NoExceptionsNoRtti` +
+`Structural.HotPathForbiddenConstructs` + 3 new `cache_test.cpp` cases + 4 new
+`level_map_test.cpp` gapped/bitset cases), 14 invariant profiles green including the new I9 check,
+`velox_alloc_check` at 0 bytes/op / 0 allocs/op across the widened 6-op workload.

@@ -157,6 +157,91 @@ TEST(LevelMap, RecoversBestAcrossALargePriceGap) {
     EXPECT_EQ(bids.best(), px(20));  // found across the gap
 }
 
+// Mirror of RecoversBestAcrossALargePriceGap for the SELL side: the gap must be walked upward,
+// not stopped at, and this specifically exercises the l1-hierarchy jump in findSetBitAbove()
+// since the gap spans many more than 64 slots (one l0 word).
+TEST(LevelMap, AskRecoversAcrossALargePriceGap) {
+    LevelMap asks(Side::Sell, kMin, kMax, kTick);
+    std::vector<Order> store;
+    store.reserve(4);
+
+    Order* bottom = mk(store, 1, px(20), 10, Side::Sell);
+    asks.addOrder(bottom);
+    asks.addOrder(mk(store, 2, px(150), 10, Side::Sell));  // far away
+    ASSERT_EQ(asks.best(), px(20));
+
+    asks.levelAt(px(20))->unlink(bottom);
+    asks.onLevelEmptied(px(20));
+
+    EXPECT_EQ(asks.best(), px(150));  // found across the gap, upward
+}
+
+// Both range ends: emptying the level nearest the ceiling must be able to walk all the way down
+// to the floor slot (index 0) when that is the only remaining occupied level, and vice versa.
+TEST(LevelMap, BidGapWalksAllTheWayDownToTheRangeFloor) {
+    LevelMap bids(Side::Buy, kMin, kMax, kTick);
+    std::vector<Order> store;
+    store.reserve(4);
+
+    Order* top = mk(store, 1, px(199), 10, Side::Buy);
+    bids.addOrder(top);
+    bids.addOrder(mk(store, 2, kMin, 10, Side::Buy));  // the very first slot, index 0
+    ASSERT_EQ(bids.best(), px(199));
+
+    bids.levelAt(px(199))->unlink(top);
+    bids.onLevelEmptied(px(199));
+
+    EXPECT_EQ(bids.best(), kMin);
+}
+
+TEST(LevelMap, AskGapWalksAllTheWayUpToTheRangeCeiling) {
+    LevelMap asks(Side::Sell, kMin, kMax, kTick);
+    std::vector<Order> store;
+    store.reserve(4);
+
+    Order* bottom = mk(store, 1, px(2), 10, Side::Sell);
+    asks.addOrder(bottom);
+    asks.addOrder(mk(store, 2, kMax, 10, Side::Sell));  // the very last slot
+    ASSERT_EQ(asks.best(), px(2));
+
+    asks.levelAt(px(2))->unlink(bottom);
+    asks.onLevelEmptied(px(2));
+
+    EXPECT_EQ(asks.best(), kMax);
+}
+
+// The occupancy bitset must agree with PriceLevel::empty() for every slot, at every point where
+// it's checked -- this is the property that catches a missed bit-clear/bit-set, the exact class
+// of bug that would otherwise show up as a wrong best price weeks later (Spec 004).
+TEST(LevelMap, OccupancyBitsetAgreesWithLevelEmptiness) {
+    LevelMap bids(Side::Buy, kMin, kMax, kTick);
+    std::vector<Order> store;
+    store.reserve(8);
+
+    auto checkAllSlotsAgree = [&] {
+        for (std::size_t i = 0; i < bids.slots(); ++i) {
+            EXPECT_EQ(bids.occupiedBit(i), !bids.levelAtIndex(i)->empty()) << "slot " << i;
+        }
+    };
+    checkAllSlotsAgree();
+
+    Order* a = mk(store, 1, px(150), 10, Side::Buy);
+    bids.addOrder(a);
+    checkAllSlotsAgree();
+
+    Order* b = mk(store, 2, px(20), 10, Side::Buy);
+    bids.addOrder(b);
+    checkAllSlotsAgree();
+
+    bids.levelAt(px(150))->unlink(a);
+    bids.onLevelEmptied(px(150));
+    checkAllSlotsAgree();
+
+    bids.levelAt(px(20))->unlink(b);
+    bids.onLevelEmptied(px(20));
+    checkAllSlotsAgree();
+}
+
 TEST(LevelMap, RangeChecking) {
     LevelMap bids(Side::Buy, kMin, kMax, kTick);
     EXPECT_TRUE(bids.inRange(px(100)));

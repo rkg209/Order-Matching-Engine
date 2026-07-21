@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <vector>
 
 #include "engine/order_book.hpp"
 #include "platform/platform.hpp"
@@ -167,6 +168,86 @@ void BM_SubmitCrossingOrder(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations());
 }
 BENCHMARK(BM_SubmitCrossingOrder);
+
+// A book with liquidity at only a handful of widely separated prices, so that emptying the
+// best level forces LevelMap::nextOccupied() to walk across a large stretch of empty slots
+// instead of finding depth one tick away. This is the scenario the dense BM_SubmitCrossingOrder
+// / BM_SubmitRestingOrder benchmarks above structurally cannot see: they keep 50 levels of
+// contiguous depth, so the next occupied level is always adjacent.
+//
+// STEADY STATE, same discipline as populate()/BM_SubmitRestingOrder: every iteration fully
+// consumes the current best bid (forcing the gap walk down to the next sparse level), then
+// immediately replenishes the price that was just vacated -- which is the highest remaining
+// price, so it becomes best again and the exact same sparse ladder repeats forever. Net pool
+// usage per iteration is zero.
+void BM_SweepThinBook(benchmark::State& state) {
+    OrderBook book(makeConfig());
+    Trade storage[64];
+    TradeBuffer buf{storage, 64, 0};
+    OrderId id = 1;
+
+    // Liquidity at every $5 across the configured range (kMin=1 .. kMid=100), on the bid side
+    // only. Each gap between sparse levels is 500 ticks -- a walk that would be nearly free on
+    // the dense benchmark's adjacent-level book is a real scan here.
+    constexpr Price kGap = 5 * kPriceScale;
+
+    std::vector<Price> prices;  // highest first
+    for (Price p = kMid; p >= (1 * kPriceScale); p -= kGap) {
+        prices.push_back(p);
+    }
+    for (auto it = prices.rbegin(); it != prices.rend(); ++it) {
+        buf.clear();
+        NewOrder bid{
+            .id = id++,
+            .price = *it,
+            .quantity = 10,
+            .participant = 1,
+            .side = Side::Buy,
+        };
+        book.submit(bid, buf);
+    }
+    const Price topPrice = prices.front();  // the best bid, and the one repeatedly cycled
+
+    std::size_t rejects = 0;
+    for (auto _ : state) {
+        // Fully consume the current best bid -- this is what forces onLevelEmptied() ->
+        // nextOccupied() to walk the gap down to the next sparse level.
+        buf.clear();
+        NewOrder aggressor{
+            .id = id++,
+            .price = 1 * kPriceScale,  // willing to sell down to the floor of the range
+            .quantity = 10,
+            .participant = 2,
+            .side = Side::Sell,
+        };
+        SubmitStatus st = book.submit(aggressor, buf);
+        benchmark::DoNotOptimize(st);
+        if (st == SubmitStatus::RejectedPoolExhausted) ++rejects;
+
+        // Replenish the vacated top price. It is the highest remaining price by construction, so
+        // it becomes best again and the sparse ladder is exactly what it was before this
+        // iteration -- ready to force the same gap walk on the next one.
+        buf.clear();
+        NewOrder replenish{
+            .id = id++,
+            .price = topPrice,
+            .quantity = 10,
+            .participant = 1,
+            .side = Side::Buy,
+        };
+        st = book.submit(replenish, buf);
+        benchmark::DoNotOptimize(st);
+        if (st == SubmitStatus::RejectedPoolExhausted) ++rejects;
+    }
+
+    if (rejects > 0) {
+        state.SkipWithError(
+            "pool exhausted -- benchmark was measuring the REJECT path, "
+            "not matching. The numbers from this run are invalid.");
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_SweepThinBook);
 
 // --- HdrHistogram: the latency DISTRIBUTION (this is the number that matters) ---------------
 
@@ -362,6 +443,112 @@ void reportLatencyDistribution() {
     hdr_close(batchHist);
 }
 
+// Same batching method as reportLatencyDistribution(), but over the thin/gapped-book workload
+// (BM_SweepThinBook's setup) instead of the dense steady-state one. This is the "before" half of
+// Spec 004's T3 deliverable: the p999 cliff that a linear nextOccupied() scan produces on a book
+// this sparse, which BM_SubmitRestingOrder/BM_SubmitCrossingOrder cannot see at all because their
+// depth is always adjacent.
+void reportThinBookLatencyDistribution() {
+    constexpr std::size_t kWarmup = 2'000;
+    constexpr std::size_t kSamples = 200'000;
+    constexpr std::size_t kBatch = 64;
+
+    hdr_histogram* batchHist = nullptr;
+    if (hdr_init(1, 10'000'000'000LL, 3, &batchHist) != 0) {
+        std::fprintf(stderr, "hdr_init failed\n");
+        return;
+    }
+
+    OrderBook book(makeConfig());
+    Trade storage[64];
+    TradeBuffer buf{storage, 64, 0};
+    OrderId id = 1;
+
+    constexpr Price kGap = 5 * kPriceScale;
+    std::vector<Price> prices;
+    for (Price p = kMid; p >= (1 * kPriceScale); p -= kGap) {
+        prices.push_back(p);
+    }
+    for (auto it = prices.rbegin(); it != prices.rend(); ++it) {
+        buf.clear();
+        NewOrder bid{
+            .id = id++,
+            .price = *it,
+            .quantity = 10,
+            .participant = 1,
+            .side = Side::Buy,
+        };
+        book.submit(bid, buf);
+    }
+    const Price topPrice = prices.front();
+
+    std::size_t rejects = 0;
+    auto oneRound = [&]() {
+        buf.clear();
+        NewOrder aggressor{
+            .id = id++,
+            .price = 1 * kPriceScale,
+            .quantity = 10,
+            .participant = 2,
+            .side = Side::Sell,
+        };
+        SubmitStatus st = book.submit(aggressor, buf);
+        if (st == SubmitStatus::RejectedPoolExhausted) ++rejects;
+
+        buf.clear();
+        NewOrder replenish{
+            .id = id++,
+            .price = topPrice,
+            .quantity = 10,
+            .participant = 1,
+            .side = Side::Buy,
+        };
+        st = book.submit(replenish, buf);
+        if (st == SubmitStatus::RejectedPoolExhausted) ++rejects;
+    };
+
+    for (std::size_t i = 0; i < kWarmup; ++i) {
+        oneRound();
+    }
+
+    std::size_t i = 0;
+    while (i < kSamples) {
+        const std::size_t n = std::min(kBatch, kSamples - i);
+        const auto b0 = std::chrono::steady_clock::now();
+        for (std::size_t k = 0; k < n; ++k, ++i) {
+            oneRound();
+        }
+        const auto b1 = std::chrono::steady_clock::now();
+        const auto batchNs = std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count();
+        // Two submit() calls (aggressor + replenish) per round, so divide by 2*n.
+        hdr_record_value(batchHist, batchNs / static_cast<long long>(2 * n));
+    }
+
+    if (rejects > 0) {
+        std::fprintf(stderr,
+                     "\n*** INVALID RUN: %zu orders were rejected for pool exhaustion in the\n"
+                     "*** thin-book pass. Do not use these numbers.\n\n",
+                     rejects);
+    }
+
+    std::printf("\n");
+    std::printf("=== velox latency distribution (THIN/GAPPED BOOK, order-to-match) ===\n");
+    std::printf("  levels:           %zu, spaced $5 apart (gap = 500 ticks)\n", prices.size());
+    std::printf("  samples:          %zu rounds (after %zu warmup)\n", kSamples, kWarmup);
+    std::printf("\n");
+    std::printf("  PER-ORDER latency, measured over batches of %zu  <-- REPORT THIS\n", kBatch);
+    std::printf("    p50    %8lld ns\n",
+                static_cast<long long>(hdr_value_at_percentile(batchHist, 50.0)));
+    std::printf("    p99    %8lld ns\n",
+                static_cast<long long>(hdr_value_at_percentile(batchHist, 99.0)));
+    std::printf("    p999   %8lld ns\n",
+                static_cast<long long>(hdr_value_at_percentile(batchHist, 99.9)));
+    std::printf("    max    %8lld ns\n", static_cast<long long>(hdr_max(batchHist)));
+    std::printf("======================================================================\n\n");
+
+    hdr_close(batchHist);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -370,5 +557,6 @@ int main(int argc, char** argv) {
     benchmark::Shutdown();
 
     reportLatencyDistribution();
+    reportThinBookLatencyDistribution();
     return 0;
 }

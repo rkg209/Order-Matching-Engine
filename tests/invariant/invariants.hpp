@@ -483,6 +483,29 @@ inline std::optional<Violation> checkPoolAccounting(const OrderBook& book, std::
     return std::nullopt;
 }
 
+// I9 (Spec 004): LevelMap's occupancy bitset must agree with PriceLevel::empty() for EVERY
+// slot. This is the property that catches a missed bit-clear/bit-set in the hierarchical
+// bitset that replaced the linear nextOccupied() scan -- exactly the class of bug that would
+// otherwise surface as a wrong best price weeks later, on some book shape this suite's fixed
+// scenarios never happened to hit.
+inline std::optional<Violation> checkOccupancyBitsetConsistency(const OrderBook& book,
+                                                                std::size_t opIndex) {
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        const book::LevelMap& lm = book.sideView(side);
+        for (std::size_t i = 0; i < lm.slots(); ++i) {
+            const bool bit = lm.occupiedBit(i);
+            const bool nonEmpty = !lm.levelAtIndex(i)->empty();
+            if (bit != nonEmpty) {
+                std::ostringstream d;
+                d << (side == Side::Buy ? "bid" : "ask") << " slot " << i
+                  << ": occupancy bit=" << bit << " but level.empty()=" << !nonEmpty;
+                return fail(9, "I9.OccupancyBitsetConsistency", opIndex, d.str());
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace detail
 
 // The single entry point. `trades` is the TradeBuffer emitted by the op just performed (or
@@ -498,6 +521,7 @@ inline std::optional<Violation> checkAll(const OrderBook& book, Ledger& ledger, 
     if (auto v = detail::checkIdMapLevelConsistency(book, opIndex)) return v;
     if (auto v = detail::checkBestPriceIsReal(book, opIndex)) return v;
     if (auto v = detail::checkPoolAccounting(book, opIndex)) return v;
+    if (auto v = detail::checkOccupancyBitsetConsistency(book, opIndex)) return v;
     return std::nullopt;
 }
 

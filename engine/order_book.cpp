@@ -1,15 +1,39 @@
 #include "engine/order_book.hpp"
 
 #include <algorithm>
+#include <bit>
+
+#include "platform/platform.hpp"
 
 namespace velox {
+
+namespace {
+
+// OrderIdMap requires a power-of-two capacity (it masks with capacity-1 instead of taking a
+// modulus). Nothing validated that before this -- a BookConfig.maxOrders of, say, 1000 would
+// silently produce a broken mask (1999 is not a power of two) and every probe would corrupt.
+// Startup-only, off the hot path: called once, from the constructor.
+std::size_t nextPowerOfTwo(std::size_t n) noexcept {
+    if (n <= 1) return 1;
+    return std::size_t{1} << (std::bit_width(n - 1));
+}
+
+}  // namespace
 
 OrderBook::OrderBook(const BookConfig& cfg)
     : cfg_(cfg),
       bids_(Side::Buy, cfg.minPrice, cfg.maxPrice, cfg.tick),
       asks_(Side::Sell, cfg.minPrice, cfg.maxPrice, cfg.tick),
-      idMap_(cfg.maxOrders * 2),  // keep the load factor low; probing degrades badly above ~0.7
-      pool_(cfg.maxOrders) {}
+      // keep the load factor low; probing degrades badly above ~0.7 -- and round up to a power
+      // of two, which OrderIdMap's mask-based probing requires (see nextPowerOfTwo() above).
+      idMap_(nextPowerOfTwo(cfg.maxOrders * 2)),
+      pool_(cfg.maxOrders) {
+    // Startup-only, off the hot path. Locks the pages this process has touched so far into
+    // physical memory, ahead of the first order -- a page fault mid-match is a syscall in the
+    // middle of a matching decision, invisible in the mean and brutal in the p999. Honestly a
+    // no-op on macOS (see platform::prefaultPages()); real on Linux, the benchmark target.
+    platform::prefaultPages();
+}
 
 Quantity OrderBook::quantityAt(Side side, Price price) noexcept {
     PriceLevel* lvl = sideOf(side).levelAt(price);
