@@ -1,6 +1,6 @@
 # Spec 002 — Full order lifecycle & types
 
-**Status:** 📋 BACKLOG · **Phase:** A — Correct core · **Depends on:** 001
+**Status:** ✅ COMPLETE · **Phase:** A — Correct core · **Depends on:** 001
 
 ## Scope
 

@@ -13,7 +13,6 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -26,16 +25,28 @@ namespace {
 
 namespace fs = std::filesystem;
 
+enum class Kind { New, Market, Cancel, Replace };
+
 struct Command {
-    OrderId id;
-    Side side;
-    Price price;
-    Quantity quantity;
-    ParticipantId participant;
+    Kind kind = Kind::New;
+    OrderId id;         // NEW/MARKET/CANCEL: the order id. REPLACE: the OLD id.
+    OrderId newId = 0;  // REPLACE only.
+    Side side = Side::Buy;
+    Price price = 0;
+    Quantity quantity = 0;
+    ParticipantId participant = 0;
+    OrderType type = OrderType::Limit;
 };
 
-// Scenario format (one command per line, '#' comments ignored):
-//   NEW <id> <BUY|SELL> <price> <qty> <participantId>
+// Scenario format (one command per line, '#' comments ignored). Spec 001 wrote only the bare
+// NEW form; Spec 002 adds the rest. The parser `continue`s on an unrecognized verb and reads
+// the optional trailing token with `ss >> tok` (fails-and-clears harmlessly), so every Spec 001
+// scenario file still parses identically today.
+//
+//   NEW     <id> <BUY|SELL> <price> <qty> <pid> [IOC|FOK]
+//   MARKET  <id> <BUY|SELL> <qty> <pid>
+//   CANCEL  <id>
+//   REPLACE <oldId> <newId> <BUY|SELL> <price> <qty> <pid>
 std::vector<Command> loadScenario(const fs::path& p) {
     std::vector<Command> cmds;
     std::ifstream in(p);
@@ -48,10 +59,36 @@ std::vector<Command> loadScenario(const fs::path& p) {
         std::string verb, sideStr;
         Command c{};
         double price = 0;
-        ss >> verb >> c.id >> sideStr >> price >> c.quantity >> c.participant;
-        if (verb != "NEW") continue;  // Spec 001 is limit orders only
-        c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
-        c.price = static_cast<Price>(price * kPriceScale);
+
+        ss >> verb;
+        if (verb == "NEW") {
+            ss >> c.id >> sideStr >> price >> c.quantity >> c.participant;
+            c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
+            c.price = static_cast<Price>(price * kPriceScale);
+            std::string tok;
+            if (ss >> tok) {
+                if (tok == "IOC")
+                    c.type = OrderType::Ioc;
+                else if (tok == "FOK")
+                    c.type = OrderType::Fok;
+            }
+            c.kind = Kind::New;
+        } else if (verb == "MARKET") {
+            ss >> c.id >> sideStr >> c.quantity >> c.participant;
+            c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
+            c.type = OrderType::Market;
+            c.kind = Kind::Market;
+        } else if (verb == "CANCEL") {
+            ss >> c.id;
+            c.kind = Kind::Cancel;
+        } else if (verb == "REPLACE") {
+            ss >> c.id >> c.newId >> sideStr >> price >> c.quantity >> c.participant;
+            c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
+            c.price = static_cast<Price>(price * kPriceScale);
+            c.kind = Kind::Replace;
+        } else {
+            continue;  // unrecognized verb -- forward-compatible with older scenario files
+        }
         cmds.push_back(c);
     }
     return cmds;
@@ -70,29 +107,64 @@ std::string runScenario(const std::vector<Command>& cmds) {
     std::array<Trade, 256> storage{};
     TradeBuffer buf{storage.data(), storage.size(), 0};
 
-    std::ostringstream out;
-    for (const auto& c : cmds) {
-        buf.clear();
-        NewOrder o{
-            .id = c.id,
-            .price = c.price,
-            .quantity = c.quantity,
-            .participant = c.participant,
-            .side = c.side,
-        };
-        const SubmitStatus st = book.submit(o, buf);
-
-        // If a scenario ever overflows the trade buffer we must know, not silently truncate.
-        EXPECT_FALSE(buf.overflowed()) << "trade buffer overflow on order " << c.id;
-
-        if (st != SubmitStatus::Ok) {
-            out << "REJECT " << c.id << " " << static_cast<int>(st) << "\n";
-            continue;
-        }
+    auto emitTrades = [&](std::ostringstream& out) {
         for (std::size_t i = 0; i < buf.count; ++i) {
             const Trade& t = buf.data[i];
             out << "TRADE " << t.id << " agg=" << t.aggressorId << " pass=" << t.passiveId
                 << " px=" << t.price << " qty=" << t.quantity << "\n";
+        }
+    };
+
+    std::ostringstream out;
+    for (const auto& c : cmds) {
+        buf.clear();
+        switch (c.kind) {
+            case Kind::New:
+            case Kind::Market: {
+                NewOrder o{
+                    .id = c.id,
+                    .price = c.price,
+                    .quantity = c.quantity,
+                    .participant = c.participant,
+                    .side = c.side,
+                    .type = c.type,
+                };
+                const SubmitStatus st = book.submit(o, buf);
+                EXPECT_FALSE(buf.overflowed()) << "trade buffer overflow on order " << c.id;
+                emitTrades(out);
+                if (st != SubmitStatus::Ok) {
+                    out << "REJECT " << c.id << " " << static_cast<int>(st) << "\n";
+                }
+                break;
+            }
+            case Kind::Cancel: {
+                const OrderResult r = book.cancel(c.id);
+                if (r.status == SubmitStatus::Ok) {
+                    out << "CANCEL " << c.id << " OK\n";
+                } else {
+                    out << "CANCEL " << c.id << " REJECT " << static_cast<int>(r.status) << "\n";
+                }
+                break;
+            }
+            case Kind::Replace: {
+                NewOrder fresh{
+                    .id = c.newId,
+                    .price = c.price,
+                    .quantity = c.quantity,
+                    .participant = c.participant,
+                    .side = c.side,
+                };
+                const OrderResult r = book.replace(c.id, fresh, buf);
+                EXPECT_FALSE(buf.overflowed()) << "trade buffer overflow on replace " << c.id;
+                emitTrades(out);
+                if (r.status == SubmitStatus::Ok) {
+                    out << "REPLACE " << c.id << " " << c.newId << " OK\n";
+                } else {
+                    out << "REPLACE " << c.id << " " << c.newId << " REJECT "
+                        << static_cast<int>(r.status) << "\n";
+                }
+                break;
+            }
         }
     }
 
@@ -154,6 +226,47 @@ TEST(GoldenReplay, FifoSamePrice) {
 }
 TEST(GoldenReplay, PriceImprovement) {
     runGolden("price_improvement");
+}
+
+// --- Spec 002 scenarios -----------------------------------------------------------------------
+TEST(GoldenReplay, Cancel) {
+    runGolden("cancel");
+}
+TEST(GoldenReplay, CancelReplace) {
+    runGolden("cancel_replace");
+}
+TEST(GoldenReplay, MarketOrder) {
+    runGolden("market_order");
+}
+TEST(GoldenReplay, Ioc) {
+    runGolden("ioc");
+}
+TEST(GoldenReplay, Fok) {
+    runGolden("fok");
+}
+TEST(GoldenReplay, SelfTradePrevention) {
+    runGolden("self_trade_prevention");
+}
+TEST(GoldenReplay, MarketIntoEmptyBook) {
+    runGolden("market_into_empty_book");
+}
+TEST(GoldenReplay, FokAlmostFills) {
+    runGolden("fok_almost_fills");
+}
+TEST(GoldenReplay, CancelAfterFill) {
+    runGolden("cancel_after_fill");
+}
+TEST(GoldenReplay, ReplaceIntoCross) {
+    runGolden("replace_into_cross");
+}
+TEST(GoldenReplay, StpMultiLevel) {
+    runGolden("stp_multi_level");
+}
+TEST(GoldenReplay, MarketExhaustsBook) {
+    runGolden("market_exhausts_book");
+}
+TEST(GoldenReplay, CancelReplaceResetsPriority) {
+    runGolden("cancel_replace_resets_priority");
 }
 
 // Determinism is not incidental -- it is the property every other guarantee rests on. Replay

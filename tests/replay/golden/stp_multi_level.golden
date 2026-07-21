@@ -1,0 +1,3 @@
+TRADE 0 agg=4 pass=1 px=1000000 qty=10
+REJECT 4 8
+BOOK bestBid=-9223372036854775808 bestAsk=1000000 resting=2

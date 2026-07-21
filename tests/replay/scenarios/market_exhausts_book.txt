@@ -1,0 +1,3 @@
+# A market order bigger than the whole book -- the unfilled remainder is cancelled, not rested.
+NEW    1 SELL 100.00 10 1
+MARKET 2 BUY  30 2

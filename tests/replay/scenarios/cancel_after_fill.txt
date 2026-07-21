@@ -1,0 +1,4 @@
+# Cancel of an order the immediately preceding command fully filled -- must reject as unknown.
+NEW 1 SELL 100.00 50 1
+NEW 2 BUY  100.00 50 2
+CANCEL 1

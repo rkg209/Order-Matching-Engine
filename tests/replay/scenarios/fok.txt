@@ -1,0 +1,4 @@
+# FOK buy exactly matches total resting liquidity across two orders -- fills completely.
+NEW 1 SELL 100.00 50 1
+NEW 2 SELL 100.00 50 3
+NEW 3 BUY  100.00 100 2 FOK

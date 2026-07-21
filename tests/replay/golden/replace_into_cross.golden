@@ -1,0 +1,3 @@
+TRADE 0 agg=3 pass=1 px=950000 qty=30
+REPLACE 2 3 OK
+BOOK bestBid=-9223372036854775808 bestAsk=940000 resting=1

@@ -1,0 +1,4 @@
+# Replacing a resting sell to a lower price that now crosses the bid book -- matches, not rests.
+NEW     1 BUY  95.00  30 1
+NEW     2 SELL 100.00 50 2
+REPLACE 2 3 SELL 94.00 50 2

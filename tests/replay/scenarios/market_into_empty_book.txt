@@ -1,0 +1,2 @@
+# A market order with no opposite liquidity at all must reject, not "match" a sentinel.
+MARKET 1 BUY 10 1

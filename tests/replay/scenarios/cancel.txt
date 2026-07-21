@@ -1,0 +1,3 @@
+# Rest a sell, cancel it -- book must be empty again.
+NEW 1 SELL 100.00 50 1
+CANCEL 1

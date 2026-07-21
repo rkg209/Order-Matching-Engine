@@ -1,0 +1,7 @@
+# Aggressor would sweep three resting orders at the same price; only the middle one is a
+# self-trade. CancelAggressor stops matching AT that order rather than skipping past it -- the
+# third order is never reached.
+NEW 1 SELL 100.00 10 10
+NEW 2 SELL 100.00 10 20
+NEW 3 SELL 100.00 10 30
+NEW 4 BUY  100.00 30 20

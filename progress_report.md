@@ -320,3 +320,72 @@ The single source of truth for a spec's state is now the spec itself, which is w
 **Issues:** Caught only because a stale background-task notification happened to reprint the
 session-start context, making the wrong output visible. Worth noting: the tooling built to enforce
 correctness is not itself exempt from being wrong, and nothing was checking it.
+
+---
+
+## [007] 2026-07-21 — Implement Spec 002: the full order lifecycle
+
+**What:** Widened `OrderBook` from LIMIT-only (Spec 001) to the full lifecycle: `OrderType`
+(Market/Ioc/Fok, Limit default), `StpPolicy` (CancelAggressor/CancelPassive/CancelBoth,
+CancelAggressor default), an enriched `OrderResult` return type, `cancel()`, `replace()`, and
+self-trade prevention inside the match loop. `submit()`'s old body was refactored into a shared
+private `matchInto()` (the match loop, now STP-aware and OrderType-aware via a `crosses()`
+predicate that treats Market as "always crosses") plus per-type residual disposition in
+`submitEx()`. FOK gets a dedicated non-mutating pre-scan, `availableAgainst()`, that walks the
+opposite book without touching pool/id-map/levels — needed because matching is destructive and
+FOK cannot roll back a partial match. `LevelMap` gained a const `nextOccupied()`, factored out of
+`onLevelEmptied()`, so the pre-scan can walk price levels without a mutating method. Added 13 new
+golden replay scenarios (`tests/replay/scenarios|golden/*`) covering every FR-48 case plus the
+named edge cases (FOK one-short, cancel-after-fill, replace-into-cross, STP stopping mid-sweep,
+market exhausting the book, cancel/replace resetting time priority), 19 new unit tests in
+`tests/unit/order_book_test.cpp`, and extended the replay scenario grammar
+(`NEW ... [IOC|FOK]`, `MARKET`, `CANCEL`, `REPLACE`) in `tests/replay/replay_test.cpp`.
+
+**Why:** Spec 001 shipped LIMIT-only matching with `OrderIdMap`, `Order::level`, and
+`Order::participant` deliberately built but unused, so this spec cashes them in. Satisfies
+`specs/002-order-lifecycle/spec.md` FR-48 (all 11 lifecycle cases) and NFR-22 (no order lost or
+double-filled), which is why quantity conservation is asserted mechanically
+(`QuantityIsConservedAcrossMixedOrderTypes`) rather than eyeballed.
+
+**How:** Followed `.claude/plans/002-order-lifecycle.md`'s commit sequencing: types first (no
+behavior change), then the match-loop refactor (still LIMIT-only, proven neutral by the 7
+untouched Spec 001 goldens), then MARKET/IOC, then the FOK pre-scan, then cancel/replace, then
+STP, then the conservation test. STP's interaction with the FOK pre-scan is the one subtle piece
+of design: under `CancelAggressor`, the scan must **stop** counting at a same-participant order,
+not skip past it — skipping would report liquidity FOK could never legally reach, and it would
+then fail mid-execution instead of rejecting cleanly up front. A dedicated unit test
+(`FokPreScanStopsAtSelfTradeRatherThanSkippingPastIt`) plants reachable liquidity behind the
+collision specifically to catch a "skip" implementation that would wrongly report it as fillable.
+`replace()` deliberately re-validates and re-looks-up `oldId` inside `cancel()` rather than
+sharing state between the two calls — accepted because Spec 002 is a correctness-breadth spec,
+not a latency one, and `cancel`/`replace` are not p99-critical paths (the `latency-reviewer`
+sub-agent confirmed this reasoning holds and found no hot-path violations elsewhere: no
+allocation, no locks, no virtual dispatch, and `availableAgainst()` is genuinely non-mutating).
+
+**Issues:** The refactor initially introduced two real bugs, both caught before commit rather than
+by a later incident:
+
+1. **Pool exhaustion silently swallowed.** The first version of `restResidual()` returned `void`
+   and simply did nothing on `pool_.acquire() == nullptr`, so `submitEx()` unconditionally reported
+   `Ok` and `rested = true` even when the residual never actually rested — a correctness
+   regression from Spec 001's `submit()`, which correctly returned `RejectedPoolExhausted`. Fixed
+   by making `restResidual()` return `bool` and having the caller translate `false` into
+   `RejectedPoolExhausted`, restoring the original backpressure contract (NFR-10).
+
+2. **STP's default policy broke the benchmark's steady-state assumption.** `benchmark/velox_bench.cpp`
+   reused `participant = 1` for both the resting book and the alternating rest/cross workload — a
+   Spec 001 convenience that meant nothing when self-trade prevention didn't exist. With
+   `StpPolicy::CancelAggressor` now the default, every "crossing" order in the benchmark
+   self-traded against the resting book instead of matching it, so resting orders piled up
+   unboundedly instead of being consumed, and the HdrHistogram batch measurement reported p50=29ns
+   / p99=39ns against a 14ns p99 baseline — a >100% regression that looked like a real hot-path
+   problem. It was not: after giving the resting leg and the crossing leg of each benchmark
+   workload distinct participant ids (and distinct from each other), the measured p50/p99 returned
+   to 13ns/15-16ns, within the 20% gate against `benchmarks/baselines/summary.json`
+   (p50=11ns/p99=14ns). The lesson matches [005]'s: a benchmark's assumptions can silently break
+   when the semantics underneath it change, and the honest fix is to update the workload to match
+   real trading (distinct counterparties), not to tune the engine against a broken measurement.
+
+Verified: `latency-reviewer` found no hot-path violations; `correctness-verifier` confirmed 63/63
+unit tests, 21/21 replay tests (7 untouched Spec 001 goldens + 13 new + the determinism check)
+green, and `velox_alloc_check` at 0 bytes/op, 0 allocs/op.

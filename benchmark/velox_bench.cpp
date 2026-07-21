@@ -100,7 +100,11 @@ void BM_SubmitRestingOrder(benchmark::State& state) {
             // to cross); the SELL then crosses into it and fully fills it.
             .price = kMid - kTick,
             .quantity = 10,
-            .participant = 1,
+            // Distinct participants for the resting leg (2) and the crossing leg (3), and both
+            // distinct from populate()'s participant 1 -- otherwise self-trade prevention (the
+            // default policy, Spec 002) would fire on every cross instead of matching, and the
+            // resting side would grow without bound instead of staying at steady-state depth.
+            .participant = rest ? 2 : 3,
             .side = rest ? Side::Buy : Side::Sell,
         };
         SubmitStatus st = book.submit(o, buf);
@@ -218,12 +222,15 @@ void reportLatencyDistribution() {
     // warming, and the measured phase would inherit a partly-exhausted pool.
     for (std::size_t i = 0; i < kWarmup; ++i) {
         buf.clear();
+        const bool rest = (i % 2) == 0;
         NewOrder o{
             .id = id++,
             .price = kMid - kTick,
             .quantity = 10,
-            .participant = 1,
-            .side = (i % 2) == 0 ? Side::Buy : Side::Sell,
+            // See BM_SubmitRestingOrder: distinct participants so self-trade prevention (the
+            // Spec 002 default) does not fire and break the steady-state assumption.
+            .participant = rest ? 2 : 3,
+            .side = rest ? Side::Buy : Side::Sell,
         };
         book.submit(o, buf);
     }
@@ -261,12 +268,15 @@ void reportLatencyDistribution() {
     std::size_t rejects = 0;
     auto oneOrder = [&](std::size_t n) {
         buf.clear();
+        const bool rest = (n % 2) == 0;
         NewOrder o{
             .id = id++,
             .price = kMid - kTick,
             .quantity = 10,
-            .participant = 1,
-            .side = (n % 2) == 0 ? Side::Buy : Side::Sell,
+            // See BM_SubmitRestingOrder: distinct participants so self-trade prevention (the
+            // Spec 002 default) does not fire and break the steady-state assumption.
+            .participant = rest ? 2 : 3,
+            .side = rest ? Side::Buy : Side::Sell,
         };
         const SubmitStatus st = book.submit(o, buf);
         if (st == SubmitStatus::RejectedPoolExhausted) ++rejects;

@@ -1,0 +1,3 @@
+# FOK needs 100, book only has 99 -- zero trades, book provably untouched.
+NEW 1 SELL 100.00 99 1
+NEW 2 BUY  100.00 100 2 FOK

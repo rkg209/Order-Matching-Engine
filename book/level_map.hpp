@@ -59,6 +59,13 @@ class LevelMap {
         return &levels_[index(p)];
     }
 
+    const PriceLevel* levelAt(Price p) const noexcept {
+        if (!inRange(p)) {
+            return nullptr;
+        }
+        return &levels_[index(p)];
+    }
+
     // Add an order at its price, updating the best price if this order improves it.
     void addOrder(Order* o) noexcept {
         PriceLevel* lvl = &levels_[index(o->price)];
@@ -79,24 +86,28 @@ class LevelMap {
         if (p != best_) {
             return;  // an interior level emptied; the best is unaffected
         }
+        best_ = nextOccupied(p);
+    }
+
+    // The next occupied level strictly beyond `from`, walking toward worse prices (down for
+    // bids, up for asks) -- the same directional walk `onLevelEmptied()` performs after the
+    // best empties, factored out and made const so the FOK pre-scan (Spec 002) can walk the
+    // book without mutating it. Returns the empty sentinel if nothing is found.
+    Price nextOccupied(Price from) const noexcept {
         if (side_ == Side::Buy) {
-            // Bids: best is the highest. Walk DOWN toward lower prices.
-            for (std::size_t i = index(p); i-- > 0;) {
+            for (std::size_t i = index(from); i-- > 0;) {
                 if (!levels_[i].empty()) {
-                    best_ = levels_[i].price();
-                    return;
+                    return levels_[i].price();
                 }
             }
         } else {
-            // Asks: best is the lowest. Walk UP toward higher prices.
-            for (std::size_t i = index(p) + 1; i < numSlots_; ++i) {
+            for (std::size_t i = index(from) + 1; i < numSlots_; ++i) {
                 if (!levels_[i].empty()) {
-                    best_ = levels_[i].price();
-                    return;
+                    return levels_[i].price();
                 }
             }
         }
-        best_ = emptySentinel(side_);  // this side is now empty
+        return emptySentinel(side_);
     }
 
     Side side() const noexcept { return side_; }
