@@ -113,6 +113,10 @@ class LevelMap {
     Side side() const noexcept { return side_; }
     std::size_t slots() const noexcept { return numSlots_; }
 
+    // Enumeration accessor for tests and market data (Spec 008 needs level enumeration too) --
+    // never called from the matching hot path.
+    const PriceLevel* levelAtIndex(std::size_t i) const noexcept { return &levels_[i]; }
+
     // True if price `a` is strictly better than price `b` on this side.
     // Bids: higher is better. Asks: lower is better. Sentinels compare correctly by
     // construction, which is the point of choosing INT64_MIN/INT64_MAX for them.

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <type_traits>
 
 #include "common/types.hpp"
 #include "engine/order.hpp"
@@ -132,6 +133,18 @@ class OrderIdMap {
 
     std::size_t size() const noexcept { return size_; }
     std::size_t capacity() const noexcept { return capacity_; }
+
+    // Visit every (OrderId, Order*) occupied slot, in slot order. Const, noexcept as long as
+    // `f` is -- this is an introspection accessor for tests and market data (Spec 008 needs
+    // level enumeration too), never called from the matching hot path.
+    template<class F>
+    void forEach(F&& f) const noexcept(std::is_nothrow_invocable_v<F&, OrderId, Order*>) {
+        for (std::size_t i = 0; i < capacity_; ++i) {
+            if (state_[i] == State::Occupied) {
+                f(keys_[i], values_[i]);
+            }
+        }
+    }
 
  private:
     // Two states only. There is deliberately no Tombstone -- see erase().

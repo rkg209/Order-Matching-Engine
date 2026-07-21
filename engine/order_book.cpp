@@ -271,8 +271,16 @@ OrderResult OrderBook::cancel(OrderId id) noexcept {
     const Side side = o->side;
 
     // Order matters: unlink() reads o->remaining, release() invalidates the object.
-    o->level->unlink(o);
-    sideOf(side).onLevelEmptied(price);  // no-op unless `price` was the best on that side
+    PriceLevel* level = o->level;
+    level->unlink(o);
+    if (level->empty()) {
+        // Only recompute best if THIS level is now empty. Calling onLevelEmptied()
+        // unconditionally (the previous bug here, caught by Spec 003's I7 invariant) skips past
+        // a still-occupied level at `price` whenever it happened to be the best -- e.g.
+        // cancelling one of two orders resting at the same price wrongly walked past that price
+        // looking for the next occupied level, even though the other order was still there.
+        sideOf(side).onLevelEmptied(price);
+    }
     idMap_.erase(id);
     pool_.release(o);
 

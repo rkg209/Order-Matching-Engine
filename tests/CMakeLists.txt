@@ -20,3 +20,10 @@ target_compile_definitions(velox_replay_tests
     PRIVATE VELOX_REPLAY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/replay"
 )
 gtest_discover_tests(velox_replay_tests PROPERTIES LABELS "replay")
+
+# --- invariant (randomized property tests, asserted after every op) -------------------------
+add_executable(velox_invariant_tests
+    invariant/property_test.cpp
+)
+target_link_libraries(velox_invariant_tests PRIVATE velox_engine GTest::gtest_main)
+gtest_discover_tests(velox_invariant_tests PROPERTIES LABELS "invariant")

@@ -98,6 +98,11 @@ class OrderBook {
     Seq tradeCount() const noexcept { return nextTradeId_; }
     std::size_t restingOrders() const noexcept { return idMap_.size(); }
 
+    // Introspection accessors for the invariant checker (Spec 003) and market data (Spec 008).
+    // Const, noexcept, non-virtual -- never touched by the matching hot path.
+    const book::LevelMap& sideView(Side s) const noexcept { return s == Side::Buy ? bids_ : asks_; }
+    const ObjectPool<Order>& pool() const noexcept { return pool_; }
+
  private:
     book::LevelMap& sideOf(Side s) noexcept { return s == Side::Buy ? bids_ : asks_; }
 

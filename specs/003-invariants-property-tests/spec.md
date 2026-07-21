@@ -1,6 +1,6 @@
 # Spec 003 — Order-book invariants & property-based test harness
 
-**Status:** 📋 BACKLOG · **Phase:** A — Correct core · **Depends on:** 002
+**Status:** ✅ COMPLETE · **Phase:** A — Correct core · **Depends on:** 002
 
 ## Scope
 
@@ -46,16 +46,27 @@ Plus the structural invariants, which are easier to break and just as fatal:
 
 ## Definition of Done
 
-- [ ] All invariants hold after every operation across **thousands** of randomized schedules (FR-49).
-- [ ] The harness generates adversarial schedules, not just uniform-random ones: heavy cancel rates,
+- [x] All invariants hold after every operation across **thousands** of randomized schedules (FR-49).
+      12 profile-instances x 150 schedules x 150 ops = 27,000 schedules per default run (~30s
+      Release); soak-verified at `VELOX_SCHEDULES=2000` (2,000 schedules/profile).
+- [x] The harness generates adversarial schedules, not just uniform-random ones: heavy cancel rates,
       orders clustered at one price, alternating crossing/non-crossing, levels repeatedly emptied and
-      recreated, an order book driven to empty and refilled.
-- [ ] **Failures shrink.** A failing schedule is automatically reduced to the minimal counterexample.
+      recreated, an order book driven to empty and refilled. Ten profiles implemented:
+      `Uniform`, `HeavyCancel`, `SinglePrice`, `AlternatingCross`, `DrainRefill`, `LevelChurn`,
+      `StpHeavy` (x3, one per `StpPolicy`), `ReplaceHeavy`, `TinyPool`, `NarrowRange`.
+- [x] **Failures shrink.** A failing schedule is automatically reduced to the minimal counterexample.
       A 10,000-order failure a human cannot read is a failure that will not get fixed; a 3-order one
       gets fixed the same day. **The shrinker is not a nice-to-have — it is what makes this spec
-      useful.**
-- [ ] Failures are **reproducible from a printed seed**. The harness is random; the engine is not.
-- [ ] `ctest -L invariant` is wired as a CI gate.
+      useful.** Verified against two real failures found during development, both shrunk to 2 ops.
+- [x] Failures are **reproducible from a printed seed**. The harness is random; the engine is not.
+      `Property.SameSeedProducesIdenticalTradeDigest` closes the loop.
+- [x] `ctest -L invariant` is wired as a CI gate (`tests/CMakeLists.txt`, `velox_invariant_tests`).
+
+**Found a real engine bug on first run** (not hypothetical -- see `plan.md`'s Issues section):
+`OrderBook::cancel()` called `LevelMap::onLevelEmptied()` unconditionally, corrupting the tracked
+best price when cancelling one of several orders resting at the same price. Fixed; `/replay`
+stayed byte-identical (no existing golden exercised this pattern) and `/bench` showed no p99
+regression.
 
 ## Requirements satisfied
 

@@ -389,3 +389,70 @@ by a later incident:
 Verified: `latency-reviewer` found no hot-path violations; `correctness-verifier` confirmed 63/63
 unit tests, 21/21 replay tests (7 untouched Spec 001 goldens + 13 new + the determinism check)
 green, and `velox_alloc_check` at 0 bytes/op, 0 allocs/op.
+
+## [008] 2026-07-21 — Implement Spec 003: the invariant/property-test harness — and find a real bug in `cancel()`
+
+**What:** Added `tests/invariant/{invariants.hpp, schedule.hpp, shrink.hpp, property_test.cpp}` —
+a randomized property-test harness that asserts eight invariants (I1 quantity conservation, I2
+sequence monotonicity, I3 no crossed book, I4 FIFO fairness, I5 id-map/level mutual consistency,
+I6 no empty level left occupied, I7 best-price-is-real, I8 level-aggregate/pool accounting)
+after **every single operation** across ten adversarial schedule profiles (`Uniform`,
+`HeavyCancel`, `SinglePrice`, `AlternatingCross`, `DrainRefill`, `LevelChurn`, `StpHeavy` x3 —
+one per `StpPolicy` — `ReplaceHeavy`, `TinyPool`, `NarrowRange`), with a ddmin-style shrinker that
+reduces any failure to a minimal counterexample rendered in the golden-replay scenario grammar.
+Added three const, noexcept, non-virtual introspection accessors to enable it:
+`OrderIdMap::forEach`, `LevelMap::levelAtIndex`, `OrderBook::sideView`/`::pool`. Wired as
+`ctest -L invariant` (`velox_invariant_tests`) in `tests/CMakeLists.txt`. Also fixed a real bug in
+`engine/order_book.cpp`'s `OrderBook::cancel()`.
+
+**Why:** Satisfies `specs/003-invariants-property-tests/spec.md` FR-49 / NFR-21 / NFR-22 and
+constitution Principle 2 ("correctness is proven, not claimed"). Golden replay (Spec 001/002)
+only proves the engine is right on sequences a human thought to write; this spec generates the
+sequences nobody would have written by hand.
+
+**How:** Followed `.claude/plans/003-invariants-property-tests.md`'s order of work: accessors
+first (latency-reviewed, `/replay` confirmed byte-identical, `/bench` no p99 regression), then the
+checker against a hand-written 7-op sanity schedule, then a deliberate breakage (removed
+`level->reduceQuantity(qty)` from `matchInto`) to confirm the checker names the right invariant
+before trusting it against random input — it fired `I8.LevelAggregateAndPool` immediately and
+shrunk to 2 ops, exactly as predicted. Only then the generator, the shrinker, and the CMake
+wiring. The `Ledger` (the harness-side per-order accounting model) is driven by explicit
+`onSubmit`/`onCancel`/`onReplaceOldWithdrawn`/`onTrades` calls rather than trying to infer intent
+from `OrderResult` alone, because `replace()` discards `cancel()`'s own result internally
+(`order_book.cpp:309`) — the old order's `remaining` has to be read by the harness *before*
+calling `replace()`, the same pattern the plan called out up front.
+
+**Issues:** The very first full run of all 13 property tests found two real bugs, not
+hypothetical ones:
+
+1. **A bug in the checker itself (test-only, no engine impact).** `Ledger::onSubmit`
+   unconditionally reset an id's fill counters on every call, including when the submit was a
+   pre-seq reject (`RejectedDuplicateId`, but also `RejectedInvalidQuantity` /
+   `RejectedPriceOutOfRange` — `order_book.cpp` checks quantity and price range *before* the
+   duplicate-id check, so either can fire while the id is still legitimately resting) against an
+   id that was **already resting**. That reset the ledger's view of a live, untouched order,
+   producing false `I1.QuantityConservation` failures across nearly every profile. Fixed by
+   threading a `wasAlreadyResting` flag (read from `book.orders().find(id) != nullptr` before the
+   call) through `onSubmit`, and skipping the reset when a pre-seq reject hits an id that was
+   already resting.
+
+2. **A real engine bug in `OrderBook::cancel()`.** After the ledger fix, nine of the eleven
+   remaining profiles still failed — all on `I7.BestPriceIsReal`, all shrinking to the same
+   2-3-op shape: two orders resting at the same price, then a cancel of one of them. `cancel()`
+   called `sideOf(side).onLevelEmptied(price)` **unconditionally** after unlinking, but
+   `LevelMap::onLevelEmptied()` only checks `if (p != best_) return;` — it does not itself check
+   whether the level actually emptied. So cancelling one of two co-priced orders at the best price
+   wrongly walked `nextOccupied()` *past* that price looking for the next occupied level, even
+   though the other order was still resting there, corrupting the tracked best price. Fixed by
+   capturing the level pointer before `unlink()` and guarding the call with
+   `if (level->empty())` — the same pattern `matchInto()` already used correctly at both of its
+   own `onLevelEmptied()` call sites. Confirmed via `latency-reviewer` (the added
+   `PriceLevel::empty()` check is a single noexcept pointer compare, no allocation/exception/lock
+   introduced), `ctest -L replay` (stayed byte-identical — no existing golden happened to
+   exercise this exact pattern), and `/bench` (p99 stayed within the 20% gate against
+   `benchmarks/baselines/summary.json`, three repeat runs in the 14-16ns band vs. a 14ns
+   baseline, well under the 20µs budget).
+
+Verified: all 98 tests green (63 unit + 21 replay + 14 invariant, including the hand-written
+sanity test and the same-seed-same-trade-digest determinism test), `velox_alloc_check` at 0
+bytes/op, `VELOX_SCHEDULES=2000` long soak green across all ten profiles.
