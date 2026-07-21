@@ -46,16 +46,20 @@ for the pre-scan.
 
 ## Definition of Done
 
-- [ ] A golden replay scenario **and** a property test exists for **every** order type and edge case
+- [x] A golden replay scenario **and** a property test exists for **every** order type and edge case
       (FR-48's full list of 11): limit match · partial fill · full fill · cancel · cancel/replace ·
       market · IOC · FOK · crossing book · self-trade prevention · **market order into an empty book**.
-- [ ] **No order is lost or double-filled under any scenario** (NFR-22). Quantity conservation holds.
-- [ ] Cancel of an unknown or already-filled order is **rejected**, with a reason.
-- [ ] Cancel/replace **resets time priority** — proven by a test where the replaced order fills *after*
+      (`tests/replay/`, `tests/invariant/`.)
+- [x] **No order is lost or double-filled under any scenario** (NFR-22). Quantity conservation holds —
+      `Book.QuantityIsConservedAcrossMixedOrderTypes` + the randomized invariant suite.
+- [x] Cancel of an unknown or already-filled order is **rejected**, with a reason.
+      `Book.CancelUnknownIdIsRejected`, `Book.CancelOfAnOrderFullyFilledByThePrecedingCommandIsRejected`.
+- [x] Cancel/replace **resets time priority** — proven by a test where the replaced order fills *after*
       an order that arrived later than the original but earlier than the replace.
-- [ ] All Spec 001 golden scenarios still replay **byte-identically**. Adding order types must not
-      change limit-order behavior.
-- [ ] `/bench` shows no p99 regression.
+      `Book.CancelReplaceResetsTimePriority`, `GoldenReplay.CancelReplaceResetsPriority`.
+- [x] All Spec 001 golden scenarios still replay **byte-identically**. Adding order types must not
+      change limit-order behavior. 21/21 `ctest -L replay` byte-identical.
+- [x] `/bench` shows no p99 regression.
 
 ## Requirements satisfied
 

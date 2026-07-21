@@ -1,6 +1,6 @@
 # Spec 004 — Zero-allocation, single-writer hot path
 
-**Status:** 📋 BACKLOG · **Phase:** B — Latency engineering · **Depends on:** 003
+**Status:** ✅ COMPLETE · **Phase:** B — Latency engineering · **Depends on:** 003
 
 ## Scope
 
@@ -29,15 +29,20 @@ Nothing changes. Not one observable byte. That is the point.
 
 ## Definition of Done
 
-- [ ] `/alloc-check` reports **0 bytes/op and 0 allocations/op** at steady state (NFR-9, NFR-12).
-- [ ] **Every** Phase-A golden replay scenario is byte-identical to before this spec (FR-47).
-- [ ] All invariants still hold across randomized schedules.
-- [ ] p50/p99/p999 **measurably improved** vs the Spec-001 baseline. The improvement is the deliverable
-      — record the before and after in `progress_report.md`, and if the improvement is small, say so
-      instead of dressing it up.
-- [ ] The `latency-reviewer` sub-agent reports zero violations in `engine/` and `book/`.
-- [ ] No `std::mutex`, no locks, no exceptions, no virtual dispatch, no logging anywhere on the hot
-      path.
+- [x] `/alloc-check` reports **0 bytes/op and 0 allocations/op** at steady state (NFR-9, NFR-12).
+      Widened to a 6-op cycle (limit rest/cross, cancel, replace, market, IOC/FOK) and the aligned-new
+      overloads are now counted too (`benchmark/velox_alloc_check.cpp`).
+- [x] **Every** Phase-A golden replay scenario is byte-identical to before this spec (FR-47).
+      21/21 `ctest -L replay` byte-identical.
+- [x] All invariants still hold across randomized schedules. 14/14 `ctest -L invariant`, including the
+      new I9 (OccupancyBitsetConsistency) check.
+- [x] p50/p99/p999 **measurably improved** vs the Spec-001 baseline. Dense steady-state: no measurable
+      change (never hit the fixed linear scan). Thin/gapped book: p50 ~6x, p99 ~3.5-4x improvement —
+      see `progress_report.md` entry [009] for the honest before/after table.
+- [x] The `latency-reviewer` sub-agent reports zero violations in `engine/` and `book/`.
+- [x] No `std::mutex`, no locks, no exceptions, no virtual dispatch, no logging anywhere on the hot
+      path. Enforced structurally now, not just by discipline: `tests/structural/no_exceptions_tu.cpp`
+      and `tests/structural/hot_path_grep_test.py`, both wired into `ctest -L unit`.
 
 ## The work
 

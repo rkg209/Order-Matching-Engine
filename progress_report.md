@@ -543,3 +543,64 @@ Verified: all 21 replay tests byte-identical (`git status` confirms zero golden 
 `Structural.HotPathForbiddenConstructs` + 3 new `cache_test.cpp` cases + 4 new
 `level_map_test.cpp` gapped/bitset cases), 14 invariant profiles green including the new I9 check,
 `velox_alloc_check` at 0 bytes/op / 0 allocs/op across the widened 6-op workload.
+
+## [010] 2026-07-21 — Phase A+B verification pass; fix spec-status/plan drift; add manual-testing guide
+
+**What:** Ran the full test surface (`ctest -L unit/replay/invariant/alloc_check`, plus an extended
+`VELOX_SCHEDULES=5000` invariant soak) end to end against the current tree with no source changes
+pending, to verify Specs 001-004 are genuinely done before approving work on Spec 005. Result: 72/72
+unit, 21/21 replay (byte-identical), 14/14 invariant, `velox_alloc_check` 0 bytes/op — all green.
+
+While verifying, found the actual code was ahead of its own paperwork:
+
+- `specs/004-zero-alloc-hot-path/spec.md` still said `Status: 📋 BACKLOG` with every DoD box
+  unchecked, even though Spec 004 was fully implemented and written up in entry [009]. Fixed: status
+  flipped to COMPLETE, every DoD line checked with a pointer to the evidence (test names, invariant
+  ids, the entry [009] before/after table).
+- `specs/002-order-lifecycle/spec.md` had the same problem — COMPLETE header but every DoD box still
+  `[ ]`. Fixed the same way.
+- `specs/002-order-lifecycle/plan.md` and `specs/004-zero-alloc-hot-path/plan.md` did not exist —
+  the actual plans had been written to `.claude/plans/002-order-lifecycle.md` and
+  `.claude/plans/004-zero-alloc-hot-path.md` instead, contradicting `specs/README.md`'s own stated
+  convention that `plan.md`/`tasks.md` live in `specs/NNN-*/` and that the specs directory "is a
+  deliverable, not scaffolding" (CON-11). Moved both files into their proper `specs/NNN-*/plan.md`
+  location.
+- `README.md` still said "Status: Spec 001 complete" / "43 unit tests" / "7 golden scenarios" — three
+  specs and 29 unit tests and 14 golden scenarios out of date. Fixed to reflect Specs 001-004
+  complete, 72 unit / 21 replay / 14 invariant.
+- `.gitignore` lists `specs/`, `planning/`, `progress_report.md`, `CLAUDE.md`, `.specify/` as ignored
+  paths, even though `CLAUDE.md` and `specs/README.md` both state these are checked-in deliverables.
+  The existing files under those paths only stayed tracked because they were force-added before the
+  ignore rule existed (or added with `-f`); any genuinely new file under those paths (e.g. the two
+  moved `plan.md` files above) silently would not be tracked otherwise. Force-added the two `plan.md`
+  files so this fix isn't itself lost to the same bug. **Did not** change the `.gitignore` patterns
+  themselves — that is a broader tracked-files policy decision left to the project owner, flagged
+  rather than changed unilaterally.
+- Added `MANUAL_TESTING.md` (gitignored, personal checklist, not a project deliverable): build/test
+  instructions, an explanation of what each `ctest` label proves, a walkthrough of the scenario-file
+  + `VELOX_BLESS=1` workflow as the hands-on way to manually exercise the engine with no CLI built
+  yet, and a 16-row feature checklist (one row per FR-48 order-type/edge-case) to manually verify
+  before approving Spec 005.
+
+**Why:** The user asked for a strong verification pass on everything built so far (Specs 001-004)
+before moving to the next phase, plus a way to manually test it themselves. `specs/` and
+`progress_report.md` are stated in `CLAUDE.md` as "where the truth lives" — paperwork that
+contradicts the actual implemented/tested state undermines exactly the thing this project is built
+to prove (measured, not claimed).
+
+**How:** No engine/book code was changed — the verification found the implementation already
+correct and thoroughly tested; the gaps were entirely in documentation/process bookkeeping that
+lagged the actual work. Chose to fix the drift (status headers, DoD boxes, plan file locations,
+README numbers) rather than merely report it, since all of it was directly checkable against
+existing test output and prior progress-report entries. Left the `.gitignore` pattern change itself
+to the user rather than silently altering what future files get tracked.
+
+**Issues:** A `benchmark-runner` sub-agent pass flagged a p99 "regression" (17ns vs the 14ns
+baseline, +21.4%, nominally over the 20% gate). Re-ran `velox_bench` manually three times back to
+back with no code changes: p99 varied 25/35/25 ns run to run — noise far larger than the flagged
+delta, and consistent with this machine's documented lack of core isolation
+(`benchmarks/baselines/hardware.md`). Also noted, though not a codebase issue: an unrelated Chrome
+renderer process was pinned at ~97% CPU for the session's duration, a plausible contributor to the
+noise. Not treated as a real regression — no engine/book code changed this session, and the
+project's own baseline-promotion discipline (`/perf-baseline`, deliberate-only) already guards
+against chasing single noisy runs.

@@ -2,9 +2,12 @@
 
 A single-threaded, deterministic, zero-allocation order-matching engine and mini-exchange in C++20.
 
-**Status: Spec 001 complete.** The core limit order book matches by price-time priority, replays
-byte-identically, and allocates **0 bytes per order** on the hot path. The exchange surface (journal,
-gateway, market data, visualizer) is specified and queued — see [`specs/`](specs/).
+**Status: Specs 001-004 complete (Phase A — Correct core, Phase B — Latency engineering).** The
+engine handles the full order lifecycle (limit, market, IOC, FOK, cancel, cancel/replace,
+self-trade prevention), matches by price-time priority, replays byte-identically, is proven
+correct by a randomized invariant suite, and allocates **0 bytes per order** on the hot path. The
+exchange surface (journal, gateway, market data, visualizer) is specified and queued — see
+[`specs/`](specs/).
 
 ---
 
@@ -38,8 +41,9 @@ Apple M4, macOS 26.5, Apple clang 21, `-O3 -DNDEBUG`, Release.
 | | |
 |---|---|
 | Hot-path allocation | **0 bytes/op, 0 allocations/op** |
-| Golden replay | **byte-identical** across 7 scenarios |
-| Unit tests | 43 passing |
+| Golden replay | **byte-identical** across 21 scenarios |
+| Unit tests | 72 passing |
+| Invariant (property) tests | 14 passing (randomized schedules, all profiles) |
 
 Latency figures are in `benchmarks/baselines/summary.json`, and they come with caveats that travel
 with them everywhere:
@@ -60,8 +64,10 @@ with them everywhere:
 cmake -B build -G Ninja          # deps auto-fetched (GoogleTest, Google Benchmark, HdrHistogram_c)
 cmake --build build
 
-ctest --test-dir build -L unit          # 43 unit tests
-ctest --test-dir build -L replay        # golden replay, byte-for-byte
+ctest --test-dir build -L unit          # 72 unit + structural tests
+ctest --test-dir build -L replay        # golden replay, byte-for-byte (21 scenarios)
+ctest --test-dir build -L invariant     # randomized property tests (14 profiles)
+ctest --test-dir build -L alloc_check   # must report 0 bytes/op
 ./build/benchmark/velox_bench           # p50/p99/p999
 ./build/benchmark/velox_alloc_check     # must report 0 bytes/op
 ```
