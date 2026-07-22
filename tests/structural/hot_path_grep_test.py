@@ -26,6 +26,9 @@ ALLOWED_MAKE_UNIQUE_LINES = {
     ": storage_(std::make_unique<Slot[]>(capacity)), capacity_(capacity) {",
     "l0_(std::make_unique<std::uint64_t[]>(l0Words_)),",
     "l1_(std::make_unique<std::uint64_t[]>(l1Words_)),",
+    # Spec 005: the ring's one-time storage allocation, same discipline as ObjectPool's.
+    "SpscRing() : storage_(std::make_unique<T[]>(Capacity)) {",
+    "MulticastRing() : storage_(std::make_unique<T[]>(Capacity)) {",
 }
 
 # Word-bounded patterns: a bare identifier that should never appear as a whole word/token.
@@ -82,7 +85,7 @@ def check_file(path: Path):
 
 def main() -> int:
     failed = False
-    for sub in ("engine", "book"):
+    for sub in ("engine", "book", "ipc"):
         d = ROOT / sub
         for path in sorted(d.rglob("*")):
             if path.suffix not in (".hpp", ".cpp"):

@@ -14,6 +14,11 @@
 #include "engine/order_book.hpp"
 #include "engine/price_level.hpp"
 #include "engine/trade.hpp"
+#include "ipc/blocking_producer.hpp"
+#include "ipc/command.hpp"
+#include "ipc/multicast_ring.hpp"
+#include "ipc/outbound_event.hpp"
+#include "ipc/spsc_ring.hpp"
 
 using namespace velox;
 
@@ -44,5 +49,29 @@ int main() {
 
     book.cancel(3);
 
-    return book.restingOrders() == 0 ? 0 : 1;
+    // Exercise ipc/ under the same -fno-exceptions -fno-rtti build: the ring is hot-path code
+    // (runtime/ is deliberately excluded -- it legitimately owns std::thread).
+    ipc::SpscRing<ipc::Command, 8> ring;
+    ipc::Command cmd{.id = 1,
+                     .newId = 0,
+                     .price = 100 * kPriceScale,
+                     .quantity = 1,
+                     .participant = 1,
+                     .kind = ipc::CommandKind::New,
+                     .side = Side::Buy,
+                     .type = OrderType::Limit};
+    ipc::BlockingProducer producer(ring);
+    producer.push(cmd);
+    ipc::Command drained{};
+    const bool popped = ring.pop(drained);
+
+    ipc::MulticastRing<ipc::OutboundEvent, 2, 8> mcRing;
+    ipc::OutboundEvent ev = ipc::tradeEvent(Trade{});
+    auto* slot = mcRing.tryClaim();
+    if (slot != nullptr) {
+        *slot = ev;
+        mcRing.publish();
+    }
+
+    return (book.restingOrders() == 0 && popped) ? 0 : 1;
 }

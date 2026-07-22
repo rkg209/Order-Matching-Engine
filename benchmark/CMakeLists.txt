@@ -5,9 +5,17 @@ target_include_directories(velox_bench PRIVATE ${hdrhistogram_SOURCE_DIR}/includ
 add_executable(velox_alloc_check velox_alloc_check.cpp)
 target_link_libraries(velox_alloc_check PRIVATE velox_engine)
 
+find_package(Threads REQUIRED)
+add_executable(velox_ring_bench velox_ring_bench.cpp)
+target_link_libraries(velox_ring_bench PRIVATE velox_engine hdr_histogram_static Threads::Threads)
+target_include_directories(velox_ring_bench PRIVATE ${hdrhistogram_SOURCE_DIR}/include)
+
 # NFR-32: these labels must exist.
 add_test(NAME bench COMMAND velox_bench --benchmark_min_time=0.1s)
 set_tests_properties(bench PROPERTIES LABELS "bench")
+
+add_test(NAME ring_bench COMMAND velox_ring_bench)
+set_tests_properties(ring_bench PROPERTIES LABELS "bench")
 
 add_test(NAME alloc_check COMMAND velox_alloc_check)
 set_tests_properties(alloc_check PROPERTIES LABELS "alloc_check")

@@ -1,4 +1,5 @@
 include(GoogleTest)
+find_package(Threads REQUIRED)
 
 # --- unit ------------------------------------------------------------------------------------
 add_executable(velox_unit_tests
@@ -8,9 +9,22 @@ add_executable(velox_unit_tests
     unit/order_id_map_test.cpp
     unit/order_book_test.cpp
     unit/cache_test.cpp
+    unit/spsc_ring_test.cpp
+    unit/matching_thread_test.cpp
 )
-target_link_libraries(velox_unit_tests PRIVATE velox_engine GTest::gtest_main)
+target_link_libraries(velox_unit_tests PRIVATE velox_engine GTest::gtest_main Threads::Threads)
 gtest_discover_tests(velox_unit_tests PROPERTIES LABELS "unit")
+
+# Spec 005 T0: the SPSC ring's two-thread strict-sequence test, rebuilt under ThreadSanitizer.
+# This is the one place in the project where a data race is possible at all, so it is the one
+# place the sanitizer earns its (considerable) runtime cost -- kept as its own target rather
+# than sanitizing the whole unit suite.
+add_executable(velox_spsc_tsan_test unit/spsc_ring_tsan_test.cpp)
+target_link_libraries(velox_spsc_tsan_test PRIVATE velox_engine GTest::gtest_main Threads::Threads)
+target_compile_options(velox_spsc_tsan_test PRIVATE -fsanitize=thread -g -O1)
+target_link_options(velox_spsc_tsan_test PRIVATE -fsanitize=thread)
+add_test(NAME SpscRing.Tsan COMMAND velox_spsc_tsan_test)
+set_tests_properties(SpscRing.Tsan PROPERTIES LABELS "tsan")
 
 # --- replay (golden scenarios, compared byte-for-byte) ---------------------------------------
 add_executable(velox_replay_tests
