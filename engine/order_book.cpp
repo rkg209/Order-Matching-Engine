@@ -312,6 +312,41 @@ OrderResult OrderBook::cancel(OrderId id) noexcept {
     return result;
 }
 
+bool OrderBook::restoreResting(const NewOrder& o, Quantity remaining, Seq seq) noexcept {
+    Order* node = pool_.acquire();
+    if (node == nullptr) {
+        return false;
+    }
+    node->id = o.id;
+    node->price = o.price;
+    node->quantity = o.quantity;
+    node->remaining = remaining;
+    node->participant = o.participant;
+    node->seq = seq;
+    node->side = o.side;
+    node->prev = nullptr;
+    node->next = nullptr;
+    node->level = nullptr;
+
+    // Checked BEFORE the level insert, not after: idMap_.insert() is what can fail (a duplicate
+    // id -- a corrupted or hand-edited snapshot/journal), and failing here must leave the book
+    // completely untouched, exactly like submitEx()'s own duplicate-id pre-check. Doing the level
+    // insert first would leave an Order reachable from matchInto() (so it could trade) but
+    // unreachable from cancel() (so its pool slot would leak forever) -- a duplicate id must
+    // never partially land.
+    if (!idMap_.insert(o.id, node)) {
+        pool_.release(node);
+        return false;
+    }
+    sideOf(o.side).addOrder(node);
+    return true;
+}
+
+void OrderBook::restoreCounters(Seq lastSeq, Seq nextTradeId) noexcept {
+    seq_ = lastSeq;
+    nextTradeId_ = nextTradeId;
+}
+
 OrderResult OrderBook::replace(OrderId oldId, const NewOrder& fresh, TradeBuffer& trades) noexcept {
     OrderResult result{};
 

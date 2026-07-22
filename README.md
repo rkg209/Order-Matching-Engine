@@ -68,11 +68,43 @@ ctest --test-dir build -L unit          # 72 unit + structural tests
 ctest --test-dir build -L replay        # golden replay, byte-for-byte (21 scenarios)
 ctest --test-dir build -L invariant     # randomized property tests (14 profiles)
 ctest --test-dir build -L alloc_check   # must report 0 bytes/op
+ctest --test-dir build -L recovery      # journal/snapshot/sequencer + a real SIGKILL-and-recover
 ./build/benchmark/velox_bench           # p50/p99/p999
 ./build/benchmark/velox_alloc_check     # must report 0 bytes/op
 ```
 
 Requires CMake ≥ 3.24, Ninja, and a C++20 compiler. Nothing else — no vcpkg, no Conan.
+
+## Recovery (Spec 006)
+
+`apps/velox_live` is a real process with a durable journal in front of the matching engine, so a
+crash mid-stream is recoverable rather than fatal:
+
+```bash
+./build/apps/velox_live --mode=live    --journal=DIR [--snapshot-every=N] [--group-commit=N]
+./build/apps/velox_live --mode=recover --journal=DIR [--digest-out=FILE]
+./build/apps/velox_live --mode=bench   --journal=DIR   # journal OFF -- no-durability headline path
+```
+
+Every inbound command gets a global sequence number, is fsynced to a segmented journal, and is
+only THEN acknowledged (`ACK <seq>` on stdout) and handed to the matching thread. A background
+shadow-replay thread owns its own independent `OrderBook` and periodically replays the journal
+into a CRC32'd, atomically-renamed snapshot — the live matching thread's contribution to
+snapshotting is zero: no flag, no copy-out, no pause, ever (determinism is what makes that sound).
+Restart in `--mode=recover` and the engine rebuilds itself from the newest valid snapshot plus the
+journal tail, with no manual step.
+
+Two numbers that must never be conflated:
+
+| Path | Measured (this repo, macOS-arm64, `F_FULLFSYNC`) | Guarantee |
+|---|---|---|
+| **Durable, `fsync` per record** (the default) | ~144 orders/sec | every ACKed order survives a crash |
+| **Durable, `--group-commit=64`** | ~9,850 orders/sec | up to 63 unfsynced orders can be lost on power failure |
+| **`--mode=bench` (no journal)** | 85,608,400 orders/sec | **none** — this is the matching-only headline, never durable |
+
+`fsync` on macOS/APFS only flushes to the drive's write cache; the honest durable barrier is
+`F_FULLFSYNC`, and it costs roughly two orders of magnitude more than that — which is exactly why
+the per-record durable number above looks small. That is the true cost of the guarantee, not a bug.
 
 ## The order book
 

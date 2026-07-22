@@ -70,8 +70,19 @@ target_include_directories(velox_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(velox_engine PUBLIC cxx_std_20)
 
 # ---------------------------------------------------------------------------------------------
+# Sequencer / journal / recovery (Spec 006). Header-only; this INTERFACE target exists so
+# consumers declare the dependency explicitly rather than relying on velox_engine's include dirs
+# leaking the right headers by accident.
+# ---------------------------------------------------------------------------------------------
+add_library(velox_sequencer INTERFACE)
+target_link_libraries(velox_sequencer INTERFACE velox_engine)
+target_include_directories(velox_sequencer INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---------------------------------------------------------------------------------------------
 # Tests. CTest labels are fixed by NFR-32: unit, replay, invariant, bench, alloc_check.
+# recovery (Spec 006) is a new label added to that set.
 # ---------------------------------------------------------------------------------------------
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(benchmark)
+add_subdirectory(apps)

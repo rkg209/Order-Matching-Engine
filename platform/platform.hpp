@@ -11,6 +11,8 @@
 // than silently pretending. A benchmark that believes it got a pinned core when it did not
 // produces a number that is a lie, and the lie is invisible.
 
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstddef>
 
 #if defined(__APPLE__)
@@ -93,6 +95,47 @@ inline const char* platformName() noexcept {
     return "macos-x86_64";
 #else
     return "unknown";
+#endif
+}
+
+// Durably flush a file's contents to storage, honestly.
+//
+// Plain fsync() on macOS/APFS only flushes to the drive's write cache, not the platter/flash --
+// the drive is free to lose it on power failure. F_FULLFSYNC is the real barrier there, and it
+// is roughly two orders of magnitude slower, which is precisely why an honest durable-throughput
+// number on this platform looks bad: that IS the true cost of the guarantee. Report which one
+// ran (fsyncMechanismName()) in any durable-throughput output -- otherwise the macOS number is a
+// lie by that same factor.
+inline bool fsyncFile(int fd) noexcept {
+#if defined(__APPLE__)
+    return ::fcntl(fd, F_FULLFSYNC) == 0;
+#elif defined(__linux__)
+    return ::fdatasync(fd) == 0;
+#else
+    return ::fsync(fd) == 0;
+#endif
+}
+
+// Durably flush a directory's entry table -- needed after rename()/create() so the directory
+// entry itself (not just the file's contents) survives a crash. Opens and closes its own fd;
+// off the hot path, this is not latency-sensitive.
+inline bool fsyncDir(const char* path) noexcept {
+    int fd = ::open(path, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    const bool ok = fsyncFile(fd);
+    ::close(fd);
+    return ok;
+}
+
+inline const char* fsyncMechanismName() noexcept {
+#if defined(__APPLE__)
+    return "F_FULLFSYNC";
+#elif defined(__linux__)
+    return "fdatasync";
+#else
+    return "fsync";
 #endif
 }
 

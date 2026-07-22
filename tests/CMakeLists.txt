@@ -43,6 +43,27 @@ add_executable(velox_invariant_tests
 target_link_libraries(velox_invariant_tests PRIVATE velox_engine GTest::gtest_main)
 gtest_discover_tests(velox_invariant_tests PROPERTIES LABELS "invariant")
 
+# --- recovery (Spec 006: journal/snapshot/sequencer round trips + RecoveryManager) -----------
+add_executable(velox_recovery_tests
+    recovery/recovery_test.cpp
+)
+target_link_libraries(velox_recovery_tests PRIVATE velox_sequencer GTest::gtest_main Threads::Threads)
+gtest_discover_tests(velox_recovery_tests PROPERTIES LABELS "recovery")
+
+# SIGKILL-a-real-process suite: forks/execs the actual velox_live binary, so it must be built
+# first and its path handed in as a compile definition. Generous timeout -- it forks two real
+# processes and does real fsync I/O.
+add_executable(velox_recover_sigkill_test
+    recovery/recover_sigkill_test.cpp
+)
+target_link_libraries(velox_recover_sigkill_test PRIVATE velox_sequencer GTest::gtest_main)
+add_dependencies(velox_recover_sigkill_test velox_live)
+target_compile_definitions(velox_recover_sigkill_test
+    PRIVATE VELOX_LIVE_BIN="$<TARGET_FILE:velox_live>"
+)
+add_test(NAME Recovery.SigkillMidStream COMMAND velox_recover_sigkill_test)
+set_tests_properties(Recovery.SigkillMidStream PROPERTIES LABELS "recovery" TIMEOUT 300)
+
 # --- structural (mechanical proofs, not tests of behavior) -----------------------------------
 
 # T1.2: engine/ and book/ headers must compile without exception support or RTTI. If a hot-path

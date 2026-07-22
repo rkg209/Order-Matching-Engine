@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "common/scenario.hpp"
 #include "engine/order_book.hpp"
 #include "ipc/command.hpp"
 #include "ipc/outbound_event.hpp"
@@ -30,73 +31,15 @@ namespace {
 
 namespace fs = std::filesystem;
 
-enum class Kind { New, Market, Cancel, Replace };
+// The scenario format itself now lives in common/scenario.hpp (Spec 006 T8), shared with
+// `velox_live --mode=live`. Local aliases keep the rest of this file unchanged.
+using Kind = common::ScenarioKind;
+using Command = common::ScenarioCommand;
 
-struct Command {
-    Kind kind = Kind::New;
-    OrderId id;         // NEW/MARKET/CANCEL: the order id. REPLACE: the OLD id.
-    OrderId newId = 0;  // REPLACE only.
-    Side side = Side::Buy;
-    Price price = 0;
-    Quantity quantity = 0;
-    ParticipantId participant = 0;
-    OrderType type = OrderType::Limit;
-};
-
-// Scenario format (one command per line, '#' comments ignored). Spec 001 wrote only the bare
-// NEW form; Spec 002 adds the rest. The parser `continue`s on an unrecognized verb and reads
-// the optional trailing token with `ss >> tok` (fails-and-clears harmlessly), so every Spec 001
-// scenario file still parses identically today.
-//
-//   NEW     <id> <BUY|SELL> <price> <qty> <pid> [IOC|FOK]
-//   MARKET  <id> <BUY|SELL> <qty> <pid>
-//   CANCEL  <id>
-//   REPLACE <oldId> <newId> <BUY|SELL> <price> <qty> <pid>
 std::vector<Command> loadScenario(const fs::path& p) {
-    std::vector<Command> cmds;
     std::ifstream in(p);
     EXPECT_TRUE(in.good()) << "cannot open scenario: " << p;
-
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        std::istringstream ss(line);
-        std::string verb, sideStr;
-        Command c{};
-        double price = 0;
-
-        ss >> verb;
-        if (verb == "NEW") {
-            ss >> c.id >> sideStr >> price >> c.quantity >> c.participant;
-            c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
-            c.price = static_cast<Price>(price * kPriceScale);
-            std::string tok;
-            if (ss >> tok) {
-                if (tok == "IOC")
-                    c.type = OrderType::Ioc;
-                else if (tok == "FOK")
-                    c.type = OrderType::Fok;
-            }
-            c.kind = Kind::New;
-        } else if (verb == "MARKET") {
-            ss >> c.id >> sideStr >> c.quantity >> c.participant;
-            c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
-            c.type = OrderType::Market;
-            c.kind = Kind::Market;
-        } else if (verb == "CANCEL") {
-            ss >> c.id;
-            c.kind = Kind::Cancel;
-        } else if (verb == "REPLACE") {
-            ss >> c.id >> c.newId >> sideStr >> price >> c.quantity >> c.participant;
-            c.side = (sideStr == "BUY") ? Side::Buy : Side::Sell;
-            c.price = static_cast<Price>(price * kPriceScale);
-            c.kind = Kind::Replace;
-        } else {
-            continue;  // unrecognized verb -- forward-compatible with older scenario files
-        }
-        cmds.push_back(c);
-    }
-    return cmds;
+    return common::loadScenarioStream(in);
 }
 
 // The serialized form IS the contract. Keep it stable -- changing it invalidates every golden

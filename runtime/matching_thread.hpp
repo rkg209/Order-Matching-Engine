@@ -72,6 +72,17 @@ class MatchingThread {
 
     const OrderBook& book() const noexcept { return book_; }
 
+    // Recovery restore hook (Spec 006). Lets a caller (e.g. RecoveryManager) rebuild this
+    // thread's OrderBook from a snapshot/journal tail BEFORE start() spawns the matching thread.
+    // MUST be called before start() -- calling it after is undefined, since the matching thread
+    // would then be concurrently reading/writing the same book. This is not a hot-path method:
+    // it runs once, synchronously, on the calling thread, before there IS a matching thread, so
+    // it cannot perturb the dispatch loop's codegen.
+    template<class F>
+    void restoreBeforeStart(F&& f) {
+        f(book_);
+    }
+
  private:
     void run() {
         pinned_.store(platform::pinThreadToCpu(cpu_), std::memory_order_release);

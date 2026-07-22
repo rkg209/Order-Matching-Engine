@@ -1,0 +1,2 @@
+add_executable(velox_live velox_live.cpp)
+target_link_libraries(velox_live PRIVATE velox_sequencer)

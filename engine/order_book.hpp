@@ -87,6 +87,29 @@ class OrderBook {
     // genuinely new arrival (FR-10).
     OrderResult replace(OrderId oldId, const NewOrder& fresh, TradeBuffer& trades) noexcept;
 
+    // Recovery restore path (Spec 006). NOT called from the matching hot path -- exclusively by
+    // RecoveryManager and the shadow snapshot thread, which build a book by replaying a snapshot
+    // body / journal tail rather than submit()ting through matching. No matching, no rejection
+    // status, no logging: acquire from the pool, fill the order, rest it, index it. Every
+    // resting order is by construction a LIMIT (MARKET/IOC never rest, FOK is all-or-nothing),
+    // so there is no order-type argument. Kept out-of-line (order_book.cpp) so it cannot perturb
+    // submit()'s codegen -- see .claude/plans/006-sequencer-journal-recovery.md, T5.
+    //
+    // `remaining` is passed separately from `o.quantity` because a restored order may already
+    // be partially filled (the snapshot/journal records both `quantity` as originally submitted
+    // and `remaining` as of the snapshot instant).
+    //
+    // Returns false on pool exhaustion or a duplicate id -- a caller restoring a snapshot/journal
+    // that was itself produced under the SAME maxOrders cap should never see either, so a caller
+    // MUST treat false as corruption, not silently drop the order: dropping it here is a worse
+    // failure than a loud rejection (same principle as NFR-10's pool-exhaustion backpressure).
+    bool restoreResting(const NewOrder& o, Quantity remaining, Seq seq) noexcept;
+
+    // Recovery restore path (Spec 006). Sets the arrival/trade-id counters directly, bypassing
+    // the ++seq_ increment submit() uses -- restoreResting() callers pass each order's own seq
+    // explicitly, so this exists only to fix the book's OWN counters to match afterward.
+    void restoreCounters(Seq lastSeq, Seq nextTradeId) noexcept;
+
     Price bestBid() const noexcept { return bids_.best(); }
     Price bestAsk() const noexcept { return asks_.best(); }
 
