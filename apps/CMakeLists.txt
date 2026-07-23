@@ -1,2 +1,8 @@
 add_executable(velox_live velox_live.cpp)
 target_link_libraries(velox_live PRIVATE velox_sequencer)
+
+add_executable(velox_gateway velox_gateway.cpp)
+target_link_libraries(velox_gateway PRIVATE velox_gateway_lib)
+
+add_executable(velox_client velox_client.cpp)
+target_link_libraries(velox_client PRIVATE velox_protocol velox_asio)

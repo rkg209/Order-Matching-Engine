@@ -66,7 +66,7 @@ int main() {
     const bool popped = ring.pop(drained);
 
     ipc::MulticastRing<ipc::OutboundEvent, 2, 8> mcRing;
-    ipc::OutboundEvent ev = ipc::tradeEvent(Trade{});
+    ipc::OutboundEvent ev = ipc::tradeEvent(Trade{}, 0);
     auto* slot = mcRing.tryClaim();
     if (slot != nullptr) {
         *slot = ev;

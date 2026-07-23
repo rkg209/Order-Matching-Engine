@@ -16,6 +16,15 @@
 
 namespace velox::sequencer {
 
+// Tri-state result for the non-blocking submit path (Spec 007 T3). Sessions must never spin on
+// a full ring the way submit() does -- a session that spins blocks the single gateway io
+// thread and stalls every other connection, whereas the right response to backpressure here is
+// to stop reading the socket and let TCP's own flow control apply (see gateway/session.hpp).
+struct TrySubmitResult {
+    enum class Outcome { Sequenced, RingFull, DurabilityFailure } outcome;
+    Seq seq = 0;
+};
+
 template<typename Ring>
 class Sequencer {
  public:
@@ -37,6 +46,27 @@ class Sequencer {
             platform::cpuPause();
         }
         return mySeq;
+    }
+
+    // Non-blocking counterpart of submit() (Spec 007 T3). Checks ring space FIRST, via
+    // tryClaim() -- which reserves nothing if it returns nullptr, so a RingFull result has no
+    // side effect and can be retried later once the ring drains. Only once a slot is in hand
+    // does this journal the command, preserving the same durability-before-visibility ordering
+    // submit() uses: the slot is not published until AFTER JournalWriter::append() (incl. its
+    // fsync) has returned.
+    TrySubmitResult trySubmit(ipc::CommandKind kind, const ipc::Command& cmd) {
+        ipc::Command* slot = ring_.tryClaim();
+        if (slot == nullptr) {
+            return {TrySubmitResult::Outcome::RingFull, 0};
+        }
+        const Seq mySeq = seq_ + 1;
+        if (!journal_.append(mySeq, kind, cmd)) {
+            return {TrySubmitResult::Outcome::DurabilityFailure, 0};
+        }
+        seq_ = mySeq;
+        *slot = cmd;
+        ring_.publish();
+        return {TrySubmitResult::Outcome::Sequenced, mySeq};
     }
 
     Seq lastSeq() const noexcept { return seq_; }

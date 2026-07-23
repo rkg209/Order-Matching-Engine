@@ -94,7 +94,7 @@ AbResult benchDesignA(std::size_t numEvents) {
     hdr_init(1, 10'000'000'000LL, 3, &hist);
 
     constexpr std::size_t kBatch = 256;
-    const ipc::OutboundEvent e = ipc::tradeEvent(Trade{});
+    const ipc::OutboundEvent e = ipc::tradeEvent(Trade{}, 0);
 
     const auto t0 = std::chrono::steady_clock::now();
     std::size_t i = 0;
@@ -152,7 +152,7 @@ AbResult benchDesignB(std::size_t numEvents) {
     hdr_init(1, 10'000'000'000LL, 3, &hist);
 
     constexpr std::size_t kBatch = 256;
-    const ipc::OutboundEvent e = ipc::tradeEvent(Trade{});
+    const ipc::OutboundEvent e = ipc::tradeEvent(Trade{}, 0);
 
     const auto t0 = std::chrono::steady_clock::now();
     std::size_t i = 0;

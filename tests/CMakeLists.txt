@@ -64,6 +64,41 @@ target_compile_definitions(velox_recover_sigkill_test
 add_test(NAME Recovery.SigkillMidStream COMMAND velox_recover_sigkill_test)
 set_tests_properties(Recovery.SigkillMidStream PROPERTIES LABELS "recovery" TIMEOUT 300)
 
+# --- gateway (Spec 007: wire protocol + TCP gateway) ------------------------------------------
+add_executable(velox_gateway_tests
+    gateway/codec_test.cpp
+    gateway/fragmentation_test.cpp
+    gateway/hostile_test.cpp
+    gateway/session_test.cpp
+    gateway/routing_test.cpp
+    gateway/backpressure_test.cpp
+)
+target_link_libraries(velox_gateway_tests PRIVATE velox_gateway_lib velox_protocol
+                                                   GTest::gtest_main Threads::Threads)
+target_include_directories(velox_gateway_tests PRIVATE ${CMAKE_SOURCE_DIR})
+gtest_discover_tests(velox_gateway_tests PROPERTIES LABELS "gateway")
+
+# Fuzz pass built with -fsanitize=address,undefined (NFR-27, DoD 4) -- a buffer overrun or UB in
+# the decoder must fail loudly here, not survive into production.
+add_executable(velox_gateway_fuzz gateway/fuzz_test.cpp)
+target_link_libraries(velox_gateway_fuzz PRIVATE velox_protocol GTest::gtest_main)
+target_compile_options(velox_gateway_fuzz PRIVATE -fsanitize=address,undefined -g -O1)
+target_link_options(velox_gateway_fuzz PRIVATE -fsanitize=address,undefined)
+add_test(NAME Gateway.Fuzz COMMAND velox_gateway_fuzz)
+set_tests_properties(Gateway.Fuzz PROPERTIES LABELS "gateway")
+
+# Spawns the real velox_gateway binary, SIGKILLs it mid-stream, restarts it, and checks the
+# recovered sequence -- same pattern as recovery/recover_sigkill_test.cpp.
+add_executable(velox_gateway_e2e_test gateway/e2e_test.cpp)
+target_link_libraries(velox_gateway_e2e_test PRIVATE velox_gateway_lib velox_protocol
+                                                      GTest::gtest_main)
+add_dependencies(velox_gateway_e2e_test velox_gateway)
+target_compile_definitions(velox_gateway_e2e_test
+    PRIVATE VELOX_GATEWAY_BIN="$<TARGET_FILE:velox_gateway>"
+)
+add_test(NAME Gateway.E2EKillRestart COMMAND velox_gateway_e2e_test)
+set_tests_properties(Gateway.E2EKillRestart PROPERTIES LABELS "gateway" TIMEOUT 60)
+
 # --- structural (mechanical proofs, not tests of behavior) -----------------------------------
 
 # T1.2: engine/ and book/ headers must compile without exception support or RTTI. If a hot-path

@@ -83,6 +83,12 @@ class MatchingThread {
         f(book_);
     }
 
+    // Spec 007: dispatchSeq_ must start where the recovered journal left off, or a gateway
+    // restarting mid-stream would stamp OutboundEvents with sequence numbers that collide with
+    // (or gap behind) ones already durable from a previous run. MUST be called before start(),
+    // same rule as restoreBeforeStart().
+    void restoreDispatchSeq(Seq lastSeq) noexcept { dispatchSeq_ = lastSeq; }
+
  private:
     void run() {
         pinned_.store(platform::pinThreadToCpu(cpu_), std::memory_order_release);
@@ -107,6 +113,9 @@ class MatchingThread {
     }
 
     void dispatch(const ipc::Command& cmd, TradeBuffer& buf) {
+        // Deterministic (constitution P4): derived purely from ring arrival order, one
+        // increment per dispatch() call, never from a clock.
+        ++dispatchSeq_;
         buf.clear();
         switch (cmd.kind) {
             case ipc::CommandKind::New: {
@@ -114,13 +123,13 @@ class MatchingThread {
                 const SubmitStatus st = book_.submit(o, buf);
                 publishTrades(buf);
                 if (st != SubmitStatus::Ok) {
-                    publishOutbound(ipc::statusEvent(cmd.id, st));
+                    publishOutbound(ipc::statusEvent(cmd.id, st, dispatchSeq_));
                 }
                 break;
             }
             case ipc::CommandKind::Cancel: {
                 const OrderResult r = book_.cancel(cmd.id);
-                publishOutbound(ipc::statusEvent(cmd.id, r.status));
+                publishOutbound(ipc::statusEvent(cmd.id, r.status, dispatchSeq_));
                 break;
             }
             case ipc::CommandKind::Replace: {
@@ -131,7 +140,7 @@ class MatchingThread {
                 fresh.id = cmd.newId;
                 const OrderResult r = book_.replace(cmd.id, fresh, buf);
                 publishTrades(buf);
-                publishOutbound(ipc::statusEvent(cmd.newId, r.status));
+                publishOutbound(ipc::statusEvent(cmd.newId, r.status, dispatchSeq_));
                 break;
             }
         }
@@ -139,7 +148,7 @@ class MatchingThread {
 
     void publishTrades(TradeBuffer& buf) {
         for (std::size_t i = 0; i < buf.count && i < buf.capacity; ++i) {
-            publishOutbound(ipc::tradeEvent(buf.data[i]));
+            publishOutbound(ipc::tradeEvent(buf.data[i], dispatchSeq_));
         }
     }
 
@@ -166,6 +175,7 @@ class MatchingThread {
     std::atomic<bool> pinned_{false};
     alignas(64) std::atomic<std::size_t> fullSpins_{0};
     alignas(64) std::atomic<std::size_t> processedCount_{0};
+    Seq dispatchSeq_ = 0;  // matching-thread-only, never touched cross-thread -- no atomic needed
 };
 
 }  // namespace velox::runtime

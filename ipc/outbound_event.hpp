@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <type_traits>
 
-#include "common/cache.hpp"
 #include "common/types.hpp"
 #include "engine/order_book.hpp"
 #include "engine/trade.hpp"
@@ -35,22 +34,26 @@ union OutboundPayload {
 struct OutboundEvent {
     OutboundKind kind;
     OutboundPayload payload;
+    Seq globalSeq;  // Spec 007: stamped by MatchingThread::dispatch(), ring-arrival order --
+                    // never wall-clock, so it stays deterministic (constitution P4).
 };
 
 static_assert(std::is_trivially_copyable_v<OutboundEvent>, "OutboundEvent must stay a flat POD");
-static_assert(sizeof(OutboundEvent) <= kCacheLineSize, "OutboundEvent grew past one cache line");
+static_assert(sizeof(OutboundEvent) == 64, "OutboundEvent must occupy exactly one cache line");
 
-inline OutboundEvent tradeEvent(const Trade& t) noexcept {
+inline OutboundEvent tradeEvent(const Trade& t, Seq globalSeq) noexcept {
     OutboundEvent e{};
     e.kind = OutboundKind::TradeEvent;
     e.payload.trade = t;
+    e.globalSeq = globalSeq;
     return e;
 }
 
-inline OutboundEvent statusEvent(OrderId id, SubmitStatus st) noexcept {
+inline OutboundEvent statusEvent(OrderId id, SubmitStatus st, Seq globalSeq) noexcept {
     OutboundEvent e{};
     e.kind = OutboundKind::StatusEvent;
     e.payload.statusChange = StatusChange{id, st};
+    e.globalSeq = globalSeq;
     return e;
 }
 

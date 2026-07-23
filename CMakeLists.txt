@@ -55,7 +55,23 @@ FetchContent_Declare(hdrhistogram
     GIT_SHALLOW    TRUE
 )
 
-FetchContent_MakeAvailable(googletest googlebenchmark hdrhistogram)
+# Standalone Asio, not Boost.Asio (Spec 007 plan decision 2): header-only, FetchContent-able in
+# seconds, no multi-minute Boost clone on a clean machine -- the one-command-build promise wins.
+# It ships as a plain source tree (no CMakeLists of its own for the standalone flavor), so it is
+# wired up as an INTERFACE target by hand below rather than via FetchContent_MakeAvailable.
+FetchContent_Declare(asio
+    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+    GIT_TAG        asio-1-30-2
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(googletest googlebenchmark hdrhistogram asio)
+
+add_library(velox_asio INTERFACE)
+target_include_directories(velox_asio SYSTEM INTERFACE ${asio_SOURCE_DIR}/asio/include)
+target_compile_definitions(velox_asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+find_package(Threads REQUIRED)
+target_link_libraries(velox_asio INTERFACE Threads::Threads)
 
 # ---------------------------------------------------------------------------------------------
 # The engine.
@@ -77,6 +93,28 @@ target_compile_features(velox_engine PUBLIC cxx_std_20)
 add_library(velox_sequencer INTERFACE)
 target_link_libraries(velox_sequencer INTERFACE velox_engine)
 target_include_directories(velox_sequencer INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---------------------------------------------------------------------------------------------
+# Wire protocol (Spec 007 T1). Deliberately asio-free -- no I/O, no sockets -- so it can be
+# fuzzed and unit-tested standalone, and so a protocol-only change never triggers a network
+# dependency rebuild.
+# ---------------------------------------------------------------------------------------------
+add_library(velox_protocol
+    protocol/decoder.cpp
+    protocol/encoder.cpp
+)
+target_include_directories(velox_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(velox_protocol PUBLIC velox_engine)
+
+# ---------------------------------------------------------------------------------------------
+# Gateway (Spec 007 T2-T5): the binary protocol's TCP server. The only component that allocates
+# freely and the only one that links asio -- off the hot path entirely.
+# ---------------------------------------------------------------------------------------------
+add_library(velox_gateway_lib
+    gateway/session.cpp
+)
+target_include_directories(velox_gateway_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(velox_gateway_lib PUBLIC velox_protocol velox_sequencer velox_asio)
 
 # ---------------------------------------------------------------------------------------------
 # Tests. CTest labels are fixed by NFR-32: unit, replay, invariant, bench, alloc_check.
