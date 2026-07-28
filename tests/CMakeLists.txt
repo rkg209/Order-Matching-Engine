@@ -99,6 +99,18 @@ target_compile_definitions(velox_gateway_e2e_test
 add_test(NAME Gateway.E2EKillRestart COMMAND velox_gateway_e2e_test)
 set_tests_properties(Gateway.E2EKillRestart PROPERTIES LABELS "gateway" TIMEOUT 60)
 
+# --- marketdata (Spec 008: L2/L3 + trade-tick feed) -------------------------------------------
+add_executable(velox_marketdata_tests
+    marketdata/reconstruction_test.cpp
+    marketdata/codec_test.cpp
+    marketdata/slow_subscriber_test.cpp
+    marketdata/feed_server_test.cpp
+)
+target_link_libraries(velox_marketdata_tests PRIVATE velox_marketdata velox_engine
+                                                      GTest::gtest_main Threads::Threads)
+target_include_directories(velox_marketdata_tests PRIVATE ${CMAKE_SOURCE_DIR})
+gtest_discover_tests(velox_marketdata_tests PROPERTIES LABELS "marketdata")
+
 # --- structural (mechanical proofs, not tests of behavior) -----------------------------------
 
 # T1.2: engine/ and book/ headers must compile without exception support or RTTI. If a hot-path

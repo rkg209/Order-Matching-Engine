@@ -42,7 +42,10 @@ struct RouteEntry {
 class GatewayServer {
  public:
     using InRing = ipc::SpscRing<ipc::Command>;
-    using OutRing = ipc::MulticastRing<ipc::OutboundEvent, 2>;
+    // Must match runtime::MatchingThread<>::OutRing exactly (same GatingMask) -- this is the
+    // ring the matching thread actually publishes into, and index 1 (market data, Spec 008) is
+    // non-gating there.
+    using OutRing = ipc::MulticastRing<ipc::OutboundEvent, 2, 65536, 0b01u>;
 
     GatewayServer(asio::io_context& io, sequencer::Sequencer<InRing>& seqr, OutRing& outRing,
                   AuthHandler auth, protocol::InstrumentId instrumentId, Price minPrice,
@@ -124,9 +127,9 @@ class GatewayServer {
         });
     }
 
-    // Runs on the dedicated router thread. Drains consumer index 0 (exec reports) and, until
-    // Spec 008 exists, also drains consumer index 1 as a no-op -- otherwise the MulticastRing's
-    // min-cursor gate would stall the matching thread forever (plan T4).
+    // Runs on the dedicated router thread. Drains consumer index 0 (exec reports) only --
+    // index 1 (market data, Spec 008) is non-gating (GatingMask), so this thread does not need
+    // to touch it at all, and must not: marketdata::Publisher is index 1's one and only reader.
     void runRouter() {
         while (routerRunning_.load(std::memory_order_acquire)) {
             bool any = false;
@@ -135,9 +138,6 @@ class GatewayServer {
                 any = true;
                 routeOne(*ev);
                 outRing_.consume(0);
-            }
-            while (outRing_.tryPeek(1) != nullptr) {
-                outRing_.consume(1);
             }
             if (any) {
                 // Draining consumer 0 may have freed ring space -- give every backpressured
@@ -166,23 +166,34 @@ class GatewayServer {
     }
 
     void routeOne(const ipc::OutboundEvent& ev) {
-        if (ev.kind == ipc::OutboundKind::TradeEvent) {
-            const Trade& t = ev.payload.trade;
-            routeExecReport(t.aggressorId, protocol::ExecType::Fill, t.quantity, 0, t.price, t.id,
-                            ev.globalSeq);
-            routeExecReport(t.passiveId, protocol::ExecType::Fill, t.quantity, 0, t.price, t.id,
-                            ev.globalSeq);
-            return;
-        }
-        const ipc::StatusChange& sc = ev.payload.statusChange;
-        if (sc.status == SubmitStatus::Ok) {
-            routeExecReport(sc.orderId, protocol::ExecType::NewAck, 0, 0, 0, 0, ev.globalSeq);
-        } else {
-            // The wire protocol's RejectReason is deliberately coarse (NFR-26); every engine
-            // rejection collapses to EngineReject on the wire, whichever SubmitStatus produced
-            // it -- the client learns "the engine rejected this order", not the engine's own
-            // internal taxonomy.
-            routeReject(sc.orderId, protocol::RejectReason::EngineReject, ev.globalSeq);
+        switch (ev.kind) {
+            case ipc::OutboundKind::TradeEvent: {
+                const Trade& t = ev.payload.trade;
+                routeExecReport(t.aggressorId, protocol::ExecType::Fill, t.quantity, 0, t.price,
+                                t.id, ev.globalSeq);
+                routeExecReport(t.passiveId, protocol::ExecType::Fill, t.quantity, 0, t.price, t.id,
+                                ev.globalSeq);
+                return;
+            }
+            case ipc::OutboundKind::StatusEvent: {
+                const ipc::StatusChange& sc = ev.payload.statusChange;
+                if (sc.status == SubmitStatus::Ok) {
+                    routeExecReport(sc.orderId, protocol::ExecType::NewAck, 0, 0, 0, 0,
+                                    ev.globalSeq);
+                } else {
+                    // The wire protocol's RejectReason is deliberately coarse (NFR-26); every
+                    // engine rejection collapses to EngineReject on the wire, whichever
+                    // SubmitStatus produced it -- the client learns "the engine rejected this
+                    // order", not the engine's own internal taxonomy.
+                    routeReject(sc.orderId, protocol::RejectReason::EngineReject, ev.globalSeq);
+                }
+                return;
+            }
+            case ipc::OutboundKind::OrderUpdate:
+                // Spec 008: L3 events exist for the market-data publisher (consumer index 1),
+                // not the exec-report router -- every outcome an OrderUpdate could report is
+                // already covered on this path by a TradeEvent and/or a StatusEvent.
+                return;
         }
     }
 

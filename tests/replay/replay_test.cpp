@@ -173,8 +173,8 @@ std::string runScenarioThroughRing(const std::vector<Command>& cmds) {
 
     ipc::SpscRing<ipc::Command> in;
     // MulticastRing<OutboundEvent, 2> (Spec 005 T4's decision): only consumer index 0 is read
-    // for this test's output text, but index 1 (the other future consumer) must also be drained
-    // or the producer's min-gate will eventually see it as backpressure.
+    // for this test's output text. Index 1 (market data, Spec 008) is non-gating, so leaving it
+    // undrained here cannot backpressure the producer.
     runtime::MatchingThread<>::OutRing out;
     runtime::MatchingThread<> mt(in, out, cfg);
     mt.start();
@@ -216,21 +216,20 @@ std::string runScenarioThroughRing(const std::vector<Command>& cmds) {
         SubmitStatus status = SubmitStatus::Ok;
         bool hasStatus = false;
 
-        // Consumer index 0 drives this test's output; index 1 is drained in lock-step purely
-        // to keep the producer's min-gate from seeing it as a stalled consumer.
+        // Consumer index 0 drives this test's output. Spec 008 added a third OutboundKind
+        // (OrderUpdate, the L3 stream) that also flows through index 0 -- it carries no
+        // SubmitStatus and must not be read as one, so it is explicitly ignored here.
         const ipc::OutboundEvent* ev;
         while ((ev = out.tryPeek(0)) != nullptr) {
             if (ev->kind == ipc::OutboundKind::TradeEvent) {
                 trades.push_back(ev->payload.trade);
-            } else {
+            } else if (ev->kind == ipc::OutboundKind::StatusEvent) {
                 status = ev->payload.statusChange.status;
                 hasStatus = true;
             }
             out.consume(0);
         }
-        while (out.tryPeek(1) != nullptr) {
-            out.consume(1);
-        }
+        // Index 1 (market data, Spec 008) is non-gating (GatingMask) -- nothing to drain here.
 
         for (const Trade& t : trades) {
             text << "TRADE " << t.id << " agg=" << t.aggressorId << " pass=" << t.passiveId

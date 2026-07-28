@@ -212,9 +212,8 @@ int runLive(const Args& args) {
             }
             outRing.consume(0);
         }
-        while (outRing.tryPeek(1) != nullptr) {
-            outRing.consume(1);  // second consumer slot; drained only to avoid backpressure
-        }
+        // Index 1 (market data, Spec 008) is non-gating (GatingMask) and has no reader in this
+        // binary -- nothing to drain, and nothing backpressures from leaving it alone.
 
         // Printed only now: submit() cannot return before the journal append -- including its
         // fsync -- has returned. Whatever line reaches stdout WAS durable at that moment.

@@ -51,6 +51,40 @@ enum class SubmitStatus : std::uint8_t {
     CancelledResidual,               // MARKET/IOC residual was cancelled, not rested
 };
 
+// A resting order removed by self-trade-prevention's Passive/Both policy, from inside
+// matchInto()'s inner loop. Spec 008: this removal happens with NO OrderResult and NO cancel()
+// call at all -- without capturing it, the market-data L3 stream would silently disagree with the
+// real book the instant STP fired under CancelPassive/CancelBoth, and marketdata::BookMirror
+// would keep advertising an order that the real book already erased.
+struct StpVictim {
+    OrderId id;
+    Price price;
+    Quantity quantity;
+    Quantity remaining;
+    ParticipantId participant;
+    Seq seq;
+    Side side;
+};
+
+// Caller-provided fixed buffer, same shape and same overflow-detection contract as TradeBuffer
+// (engine/trade.hpp) -- optional (nullptr) so existing submitEx() callers that don't care about
+// STP victims (every test and the invariant harness) do not have to change.
+struct StpVictimBuffer {
+    StpVictim* data;
+    std::size_t capacity;
+    std::size_t count;
+
+    void push(const StpVictim& v) noexcept {
+        if (count < capacity) {
+            data[count] = v;
+        }
+        ++count;
+    }
+
+    bool overflowed() const noexcept { return count > capacity; }
+    void clear() noexcept { count = 0; }
+};
+
 // Enriched result for callers that need more than the status: how much traded, how much is
 // left, and whether any quantity joined the book. A full execution-report stream belongs to
 // the gateway/market-data consumers built in Spec 007/008; this is the minimum needed now.
@@ -59,6 +93,17 @@ struct OrderResult {
     Quantity filled = 0;     // total quantity that traded on this command
     Quantity remaining = 0;  // unfilled at the end of the command
     bool rested = false;     // did any quantity join the book?
+
+    // Spec 008: the market-data L3/L2 path needs to know WHICH order changed, not just the
+    // outcome -- in particular a cancel only carries the id on the wire (ipc::Command), so
+    // without these the resting price/side would be lost and no L2 delete could be emitted.
+    // Every field here is one the call site already holds in a register; this is a struct-fill,
+    // not new work.
+    Price price = 0;        // the order's limit price (resting price for cancel)
+    Quantity quantity = 0;  // as originally submitted
+    ParticipantId participant = 0;
+    Seq seq = 0;  // the book's own arrival seq for this order
+    Side side = Side::Buy;
 };
 
 // A single-instrument order book with price-time-priority matching.
@@ -73,8 +118,13 @@ class OrderBook {
 
     // Match `o` against the opposite side while it crosses, emitting a trade per fill into
     // `trades`; residual disposition depends on `o.type` (see OrderType).
+    //
+    // `victims`, when non-null, receives every resting order self-trade-prevention removed under
+    // StpPolicy::CancelPassive/CancelBoth (Spec 008) -- the one book mutation that happens with
+    // no OrderResult and no cancel() call to report it otherwise.
     SubmitStatus submit(const NewOrder& o, TradeBuffer& trades) noexcept;
-    OrderResult submitEx(const NewOrder& o, TradeBuffer& trades) noexcept;
+    OrderResult submitEx(const NewOrder& o, TradeBuffer& trades,
+                         StpVictimBuffer* victims = nullptr) noexcept;
 
     // Cancel a resting order by id. O(1). Rejects if the id is not currently resting -- which
     // covers "unknown id" and "already fully filled" with the same lookup, since a fully
@@ -85,7 +135,14 @@ class OrderBook {
     // new id not a duplicate, quantity/price valid) BEFORE touching the book, so a rejected
     // replace leaves the book completely untouched. Time priority resets: the replacement is a
     // genuinely new arrival (FR-10).
-    OrderResult replace(OrderId oldId, const NewOrder& fresh, TradeBuffer& trades) noexcept;
+    //
+    // `oldResult`, when non-null, receives the OrderResult of the internal cancel() of `oldId` --
+    // Spec 008's L3 stream needs the OLD order's resting price/side (dispatch() cannot reconstruct
+    // that from `oldId` alone), and this is the one call site that has it in hand. Left untouched
+    // if validation rejects the replace before the cancel ever happens.
+    OrderResult replace(OrderId oldId, const NewOrder& fresh, TradeBuffer& trades,
+                        OrderResult* oldResult = nullptr,
+                        StpVictimBuffer* victims = nullptr) noexcept;
 
     // Recovery restore path (Spec 006). NOT called from the matching hot path -- exclusively by
     // RecoveryManager and the shadow snapshot thread, which build a book by replaying a snapshot
@@ -136,8 +193,8 @@ class OrderBook {
     // The core matching loop, shared by every order type. Consumes from `remaining`, emits
     // trades into `trades`. Does not touch the residual: resting/cancelling it is the caller's
     // job, because that is the one thing that differs by OrderType.
-    MatchOutcome matchInto(const NewOrder& in, Seq mySeq, TradeBuffer& trades,
-                           Quantity& remaining) noexcept;
+    MatchOutcome matchInto(const NewOrder& in, Seq mySeq, TradeBuffer& trades, Quantity& remaining,
+                           StpVictimBuffer* victims) noexcept;
 
     // Non-mutating pre-scan for FOK: how much quantity is actually reachable against `in`,
     // stopping at (not skipping past) a self-trade under CancelAggressor/CancelBoth, since

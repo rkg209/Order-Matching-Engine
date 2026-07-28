@@ -117,6 +117,18 @@ target_include_directories(velox_gateway_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(velox_gateway_lib PUBLIC velox_protocol velox_sequencer velox_asio)
 
 # ---------------------------------------------------------------------------------------------
+# Market data (Spec 008): L2/L3 + trade-tick feed. Off the hot path entirely -- allocates and
+# logs freely, per CLAUDE.md. feed_server.hpp links asio; book_mirror/publisher do not, so a
+# publisher-only change (no wire format change) never triggers a network dependency rebuild.
+# ---------------------------------------------------------------------------------------------
+add_library(velox_marketdata
+    marketdata/feed_encoder.cpp
+    marketdata/feed_decoder.cpp
+)
+target_include_directories(velox_marketdata PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(velox_marketdata PUBLIC velox_protocol velox_sequencer velox_asio)
+
+# ---------------------------------------------------------------------------------------------
 # Tests. CTest labels are fixed by NFR-32: unit, replay, invariant, bench, alloc_check.
 # recovery (Spec 006) is a new label added to that set.
 # ---------------------------------------------------------------------------------------------

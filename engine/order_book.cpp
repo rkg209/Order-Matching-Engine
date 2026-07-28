@@ -62,7 +62,8 @@ inline bool crosses(OrderType type, Side side, Price price, Price restingPrice) 
 }  // namespace
 
 OrderBook::MatchOutcome OrderBook::matchInto(const NewOrder& in, Seq /*mySeq*/, TradeBuffer& trades,
-                                             Quantity& remaining) noexcept {
+                                             Quantity& remaining,
+                                             StpVictimBuffer* victims) noexcept {
     // NOTE: this branches on `in.side`. planning/03-system-design.md's pseudocode does not --
     // it rests into the bid book and clears levels from the ask book unconditionally, so a
     // resting SELL would land in the bids. That bug is why this loop is written from the
@@ -88,6 +89,14 @@ OrderBook::MatchOutcome OrderBook::matchInto(const NewOrder& in, Seq /*mySeq*/, 
                 const StpPolicy policy = cfg_.stp;
                 if (policy == StpPolicy::CancelPassive || policy == StpPolicy::CancelBoth) {
                     Order* victim = resting;
+                    // Captured BEFORE unlink/release invalidate the object -- Spec 008: this is
+                    // the one book mutation with no OrderResult and no cancel() call, so without
+                    // this record the market-data L3 stream would silently disagree with the book.
+                    if (victims != nullptr) {
+                        victims->push(StpVictim{victim->id, victim->price, victim->quantity,
+                                                victim->remaining, victim->participant, victim->seq,
+                                                victim->side});
+                    }
                     level->unlink(victim);
                     idMap_.erase(victim->id);
                     pool_.release(victim);
@@ -205,8 +214,17 @@ bool OrderBook::restResidual(const NewOrder& in, Seq mySeq, Quantity remaining) 
     return true;
 }
 
-OrderResult OrderBook::submitEx(const NewOrder& in, TradeBuffer& trades) noexcept {
+OrderResult OrderBook::submitEx(const NewOrder& in, TradeBuffer& trades,
+                                StpVictimBuffer* victims) noexcept {
     OrderResult result{};
+    // Spec 008: filled in BEFORE any validation can return early, so a market-data OrderUpdate
+    // for a REJECTED order still carries the order's real price/quantity/participant/side rather
+    // than the struct's zero defaults (`seq` is the one exception -- a rejected order never gets
+    // an arrival seq, so it stays 0, which is correct: it never entered the book).
+    result.price = in.price;
+    result.quantity = in.quantity;
+    result.participant = in.participant;
+    result.side = in.side;
 
     if (in.quantity <= 0) {
         result.status = SubmitStatus::RejectedInvalidQuantity;
@@ -236,8 +254,9 @@ OrderResult OrderBook::submitEx(const NewOrder& in, TradeBuffer& trades) noexcep
 
     const Seq mySeq = ++seq_;
     Quantity remaining = in.quantity;
+    result.seq = mySeq;
 
-    const MatchOutcome outcome = matchInto(in, mySeq, trades, remaining);
+    const MatchOutcome outcome = matchInto(in, mySeq, trades, remaining, victims);
     result.filled = in.quantity - remaining;
     result.remaining = remaining;
 
@@ -290,6 +309,11 @@ OrderResult OrderBook::cancel(OrderId id) noexcept {
 
     result.remaining = o->remaining;
     result.filled = o->quantity - o->remaining;
+    result.price = o->price;
+    result.quantity = o->quantity;
+    result.participant = o->participant;
+    result.seq = o->seq;
+    result.side = o->side;
 
     const Price price = o->price;
     const Side side = o->side;
@@ -347,7 +371,8 @@ void OrderBook::restoreCounters(Seq lastSeq, Seq nextTradeId) noexcept {
     nextTradeId_ = nextTradeId;
 }
 
-OrderResult OrderBook::replace(OrderId oldId, const NewOrder& fresh, TradeBuffer& trades) noexcept {
+OrderResult OrderBook::replace(OrderId oldId, const NewOrder& fresh, TradeBuffer& trades,
+                               OrderResult* oldResult, StpVictimBuffer* victims) noexcept {
     OrderResult result{};
 
     // Validate everything BEFORE touching the book -- a rejected replace must leave the book
@@ -373,8 +398,11 @@ OrderResult OrderBook::replace(OrderId oldId, const NewOrder& fresh, TradeBuffer
     // cancel() looks up oldId again, which is fine: this is not the hot path (Spec 002 is a
     // correctness-breadth spec, not a latency one), and it keeps cancel() the single place that
     // knows how to unlink an order.
-    cancel(oldId);
-    return submitEx(fresh, trades);
+    const OrderResult cancelResult = cancel(oldId);
+    if (oldResult != nullptr) {
+        *oldResult = cancelResult;
+    }
+    return submitEx(fresh, trades, victims);
 }
 
 }  // namespace velox

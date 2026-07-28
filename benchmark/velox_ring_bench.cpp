@@ -215,9 +215,9 @@ void runEndToEndSaturation() {
     std::printf("\n=== T5: end-to-end saturation (ring claim -> match complete) ===\n");
 
     ipc::SpscRing<ipc::Command, 1 << 16> in;
-    // MulticastRing<OutboundEvent, 2> (Spec 005 T4's decision): both consumer cursors must be
-    // drained below, standing in for the future execution-report router and market-data
-    // publisher -- an undrained one would eventually gate the producer as backpressure.
+    // MulticastRing<OutboundEvent, 2> (Spec 005 T4's decision): only consumer index 0 (the
+    // execution-report router) gates the producer -- index 1 (market data, Spec 008) is
+    // non-gating and does not need a drainer thread here.
     runtime::MatchingThread<1 << 16, 1 << 16>::OutRing out;
     runtime::MatchingThread<1 << 16, 1 << 16> mt(in, out, makeConfig());
     mt.start();
@@ -246,10 +246,9 @@ void runEndToEndSaturation() {
         }
     }
 
-    // Two drainer threads -- one per MulticastRing consumer cursor, standing in for the future
-    // execution-report router and market-data publisher -- otherwise an undrained cursor fills
-    // the ring and the matching thread's publishOutbound() backpressure-spins forever, which
-    // would make this benchmark measure outbound congestion, not matching throughput.
+    // One drainer thread for consumer index 0 (the execution-report router stand-in) -- the
+    // ONLY cursor that gates the producer. Index 1 (market data, Spec 008) is non-gating, so
+    // leaving it undrained cannot make publishOutbound() backpressure-spin.
     std::atomic<bool> drainStop{false};
     auto drainConsumer = [&](std::size_t idx) {
         while (!drainStop.load(std::memory_order_acquire)) {
@@ -264,7 +263,6 @@ void runEndToEndSaturation() {
         }
     };
     std::thread drainer0([&] { drainConsumer(0); });
-    std::thread drainer1([&] { drainConsumer(1); });
 
     // Let the population commands drain before the measured phase starts.
     while (mt.processedCount() < 100) {
@@ -318,7 +316,6 @@ void runEndToEndSaturation() {
 
     drainStop.store(true, std::memory_order_release);
     drainer0.join();
-    drainer1.join();
     mt.stop();
 
     const double secs = std::chrono::duration<double>(t1 - t0).count();

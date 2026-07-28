@@ -2,13 +2,21 @@
 // exactly the way apps/velox_live.cpp does, then binds a TCP acceptor instead of reading a
 // scenario file from stdin. Recovery completes before the first byte is accepted.
 //
-//   velox_gateway --journal=DIR --port=PORT --creds=FILE [--instrument=ID]
+//   velox_gateway --journal=DIR --port=PORT --creds=FILE [--instrument=ID] [--md-port=PORT]
+//
+// --md-port (Spec 008) starts the market-data feed on its own acceptor, sharing this process's
+// io_context (one demo binary end-to-end for Spec 010) but driven by a SEPARATE thread that pumps
+// marketdata::Publisher -- draining the outbound ring's non-gating consumer index (1) is off the
+// order-entry path entirely, by construction (GatingMask).
 
 #include <asio.hpp>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 
 #include "engine/order_book.hpp"
 #include "gateway/auth.hpp"
@@ -16,6 +24,9 @@
 #include "ipc/command.hpp"
 #include "ipc/outbound_event.hpp"
 #include "ipc/spsc_ring.hpp"
+#include "marketdata/feed_server.hpp"
+#include "marketdata/publisher.hpp"
+#include "marketdata/snapshot_source.hpp"
 #include "platform/platform.hpp"
 #include "protocol/message_types.hpp"
 #include "recovery/recovery_manager.hpp"
@@ -33,6 +44,7 @@ struct Args {
     unsigned short port = 9001;
     std::string credsFile;
     protocol::InstrumentId instrumentId = 1;
+    unsigned short mdPort = 0;  // 0 == disabled (opt-in, not every deployment wants the feed)
 };
 
 bool takeArg(const std::string& arg, const std::string& key, std::string& out) {
@@ -56,6 +68,8 @@ Args parseArgs(int argc, char** argv) {
             a.credsFile = tmp;
         } else if (takeArg(arg, "--instrument=", tmp)) {
             a.instrumentId = static_cast<protocol::InstrumentId>(std::stoul(tmp));
+        } else if (takeArg(arg, "--md-port=", tmp)) {
+            a.mdPort = static_cast<unsigned short>(std::stoi(tmp));
         }
     }
     return a;
@@ -123,13 +137,67 @@ int main(int argc, char** argv) {
     gateway::GatewayServer server(io, seqr, outRing, std::move(auth), args.instrumentId,
                                   cfg.minPrice, cfg.maxPrice);
     server.listen(args.port);
+
+    // Spec 008: opt-in market-data feed, sharing this process's io_context for its acceptor/
+    // broadcast (one demo binary end-to-end for Spec 010) but with its OWN thread pumping
+    // marketdata::Publisher, which drains outRing's consumer index 1 -- non-gating, so this
+    // thread can never slow the matching thread down, lag arbitrarily, or even not exist at all.
+    //
+    // The snapshot source/burst rebuild from the JOURNAL (RecoveryManager), never from the live
+    // matching thread's OrderBook directly: that OrderBook is mutated by the matching thread with
+    // no synchronization for readers, by design (constitution P2, single writer) -- reading it
+    // from this thread would be a data race, exactly the hazard sequencer/snapshot_thread.hpp's
+    // "shadow book, not the live one" design already exists to avoid. The cost is that a snapshot
+    // reflects the last DURABLE state, not the absolute latest in-flight command; acceptable here
+    // since a snapshot only ever fires on a lap or a new connection, not the steady-state path.
+    std::unique_ptr<marketdata::FeedServer> feedServer;
+    std::unique_ptr<marketdata::Publisher<runtime::MatchingThread<>::OutRing>> publisher;
+    std::thread publisherThread;
+    std::atomic<bool> publisherStop{false};
+
+    if (args.mdPort != 0) {
+        auto snapshotSource = [&](marketdata::BookMirror& mirror) {
+            OrderBook shadow(cfg);
+            recovery::RecoveryManager(journalDir, snapshotDir).recover(shadow);
+            marketdata::loadMirrorFromBook(shadow, mirror);
+        };
+
+        feedServer = std::make_unique<marketdata::FeedServer>(io);
+        feedServer->setSnapshotBurst([&, snapshotSource](marketdata::Sink& sink) {
+            marketdata::BookMirror mirror;
+            snapshotSource(mirror);
+            marketdata::emitSnapshotBurst(sink, args.instrumentId, mirror);
+        });
+        feedServer->listen(args.mdPort);
+
+        publisher = std::make_unique<marketdata::Publisher<runtime::MatchingThread<>::OutRing>>(
+            outRing, args.instrumentId);
+        publisher->addSink(feedServer.get());
+        publisher->setSnapshotSource(snapshotSource);
+
+        publisherThread = std::thread([&] {
+            while (!publisherStop.load(std::memory_order_acquire)) {
+                if (publisher->pump() == 0) {
+                    platform::cpuPause();
+                }
+            }
+        });
+    }
     server.startRouter();
 
     std::cerr << "GATEWAY listening port=" << args.port << " recovered_seq=" << rr.lastSeq
-              << " fsync=" << platform::fsyncMechanismName() << "\n";
+              << " fsync=" << platform::fsyncMechanismName();
+    if (args.mdPort != 0) {
+        std::cerr << " md_port=" << args.mdPort;
+    }
+    std::cerr << "\n";
 
     io.run();  // blocks until the io_context is stopped (or all work completes)
 
+    if (publisherThread.joinable()) {
+        publisherStop.store(true, std::memory_order_release);
+        publisherThread.join();
+    }
     server.stopRouter();
     snapshotThread.stop();
     matching.stop();

@@ -87,11 +87,9 @@ TEST(MatchingThread, MatchesDirectSubmissionResult) {
         }
     }
 
-    // Through the ring: same sequence, fed via the matching thread. The outbound ring is a
-    // MulticastRing<OutboundEvent, 2> (Spec 005 T4's decision) -- both consumer cursors (the
-    // future execution-report router and market-data publisher, Spec 007/008) must be drained,
-    // since the producer gates on their minimum and this test's sequence is short enough that
-    // an undrained cursor wouldn't otherwise show up as backpressure.
+    // Through the ring: same sequence, fed via the matching thread. Only consumer index 0 (the
+    // execution-report router) gates the producer; index 1 (market data, Spec 008) is
+    // non-gating and left undrained here on purpose -- nothing in this test reads it.
     SpscRing<Command> in;
     MatchingThread<>::OutRing out;
     MatchingThread<> mt(in, out, testConfig());
@@ -108,12 +106,11 @@ TEST(MatchingThread, MatchesDirectSubmissionResult) {
         std::this_thread::yield();
     }
     mt.stop();
-    // Drain both consumer cursors so nothing is left stuck (nothing here asserts on outbound
-    // content -- that is covered by the replay-through-the-ring suite).
-    for (std::size_t idx = 0; idx < 2; ++idx) {
-        while (out.tryPeek(idx) != nullptr) {
-            out.consume(idx);
-        }
+    // Drain consumer index 0 so nothing is left stuck (nothing here asserts on outbound content
+    // -- that is covered by the replay-through-the-ring suite). Index 1 needs no draining: it is
+    // non-gating.
+    while (out.tryPeek(0) != nullptr) {
+        out.consume(0);
     }
 
     EXPECT_EQ(mt.book().bestBid(), direct.bestBid());

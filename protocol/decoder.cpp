@@ -197,6 +197,15 @@ FrameDecoder::Result FrameDecoder::next(DecodedMessage& out, RejectReason& reaso
             out.reject = m;
             break;
         }
+        case MessageType::L2Delta:
+        case MessageType::L3Order:
+        case MessageType::L3Fill:
+        case MessageType::TradeTick:
+        case MessageType::SnapshotStart:
+        case MessageType::SnapshotEnd:
+            // Market-data message types (Spec 008) never appear on the order-entry gateway's
+            // connection -- they have their own decoder (marketdata/feed_decoder.cpp).
+            return fail(RejectReason::UnknownMessageType, reason);
     }
 
     // Step 7: only now consume the frame from the reassembly buffer.

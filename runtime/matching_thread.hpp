@@ -17,6 +17,7 @@
 // is not implemented here at all -- there is no parallel "two-ring" code path to delete later.
 
 #include <atomic>
+#include <cassert>
 #include <thread>
 
 #include "engine/order_book.hpp"
@@ -35,7 +36,10 @@ template<std::size_t InCapacity = 65536, std::size_t OutCapacity = 65536>
 class MatchingThread {
  public:
     using InRing = ipc::SpscRing<ipc::Command, InCapacity>;
-    using OutRing = ipc::MulticastRing<ipc::OutboundEvent, 2, OutCapacity>;
+    // Spec 008: consumer 0 (exec-report router) stays gating; consumer 1 (market-data publisher)
+    // is non-gating (bit 1 clear in the mask) -- a slow or absent market-data consumer must never
+    // stall the matching thread. See ipc/multicast_ring.hpp's GatingMask doc.
+    using OutRing = ipc::MulticastRing<ipc::OutboundEvent, 2, OutCapacity, 0b01u>;
 
     MatchingThread(InRing& in, OutRing& out, const BookConfig& cfg, int cpu = 0)
         : in_(in), out_(out), book_(cfg), cpu_(cpu) {}
@@ -90,11 +94,24 @@ class MatchingThread {
     void restoreDispatchSeq(Seq lastSeq) noexcept { dispatchSeq_ = lastSeq; }
 
  private:
+    // 1024, not 64: a single command matching against a deep, thin book can legitimately produce
+    // more than 64 fills, and 64 was silently truncating (Spec 008 T4 finding -- publishTrades()
+    // capped at buf.capacity and TradeBuffer::overflowed() was never checked, so a >64-fill sweep
+    // dropped trades from the ring with no signal at all). Still a fixed stack buffer, reused
+    // across every dispatch() call -- no heap, no growth, same allocation-free contract as before.
+    static constexpr std::size_t kTradeBufCapacity = 1024;
+
     void run() {
         pinned_.store(platform::pinThreadToCpu(cpu_), std::memory_order_release);
 
-        Trade storage[64];
-        TradeBuffer buf{storage, 64, 0};
+        Trade storage[kTradeBufCapacity];
+        TradeBuffer buf{storage, kTradeBufCapacity, 0};
+        // Same capacity/overflow contract as `buf` -- see StpVictimBuffer's doc (engine/
+        // order_book.hpp) for why this exists at all: STP passive-cancel removes a resting order
+        // with no OrderResult and no cancel() call, so without this the L3 stream would silently
+        // disagree with the book the instant StpPolicy::CancelPassive/CancelBoth fires.
+        StpVictim victimStorage[kTradeBufCapacity];
+        StpVictimBuffer victims{victimStorage, kTradeBufCapacity, 0};
 
         for (;;) {
             const ipc::Command* cmd = in_.tryPeek();
@@ -106,30 +123,44 @@ class MatchingThread {
                 continue;
             }
 
-            dispatch(*cmd, buf);
+            dispatch(*cmd, buf, victims);
             in_.consume();
             processedCount_.fetch_add(1, std::memory_order_release);
         }
     }
 
-    void dispatch(const ipc::Command& cmd, TradeBuffer& buf) {
+    void dispatch(const ipc::Command& cmd, TradeBuffer& buf, StpVictimBuffer& victims) {
         // Deterministic (constitution P4): derived purely from ring arrival order, one
         // increment per dispatch() call, never from a clock.
         ++dispatchSeq_;
         buf.clear();
+        victims.clear();
         switch (cmd.kind) {
             case ipc::CommandKind::New: {
                 const NewOrder o = ipc::toNewOrder(cmd);
-                const SubmitStatus st = book_.submit(o, buf);
+                const OrderResult r = book_.submitEx(o, buf, &victims);
+                assert(!buf.overflowed());      // see kTradeBufCapacity's comment
+                assert(!victims.overflowed());  // see StpVictimBuffer's comment
                 publishTrades(buf);
-                if (st != SubmitStatus::Ok) {
-                    publishOutbound(ipc::statusEvent(cmd.id, st, dispatchSeq_));
+                publishStpVictims(victims);
+                if (r.status != SubmitStatus::Ok) {
+                    publishOutbound(ipc::statusEvent(cmd.id, r.status, dispatchSeq_));
                 }
+                emitOrderUpdate(cmd.id, o.side, r);
                 break;
             }
             case ipc::CommandKind::Cancel: {
                 const OrderResult r = book_.cancel(cmd.id);
                 publishOutbound(ipc::statusEvent(cmd.id, r.status, dispatchSeq_));
+                if (r.status == SubmitStatus::Ok) {
+                    // Cancel always removes something that was resting -- Rested is not a
+                    // possible outcome here, unlike New/Replace.
+                    publishOutbound(
+                        ipc::orderUpdateEvent(ipc::UpdateAction::Cancelled, r.side,
+                                              ipc::OrderUpdate{cmd.id, r.price, r.quantity,
+                                                               r.remaining, r.participant, r.seq},
+                                              dispatchSeq_));
+                }
                 break;
             }
             case ipc::CommandKind::Replace: {
@@ -138,11 +169,68 @@ class MatchingThread {
                 // order's id is newId.
                 NewOrder fresh = ipc::toNewOrder(cmd);
                 fresh.id = cmd.newId;
-                const OrderResult r = book_.replace(cmd.id, fresh, buf);
+                OrderResult oldResult{};
+                const OrderResult r = book_.replace(cmd.id, fresh, buf, &oldResult, &victims);
+                assert(!buf.overflowed());      // see kTradeBufCapacity's comment
+                assert(!victims.overflowed());  // see StpVictimBuffer's comment
+
+                // Mirrors invariant::runSchedule()'s rejectedBeforeDispatch check: these are the
+                // four statuses OrderBook::replace() can return WITHOUT ever calling cancel(), so
+                // oldResult was never written and must not be read.
+                const bool rejectedBeforeDispatch =
+                    r.status == SubmitStatus::RejectedUnknownOrder ||
+                    r.status == SubmitStatus::RejectedInvalidQuantity ||
+                    r.status == SubmitStatus::RejectedPriceOutOfRange ||
+                    r.status == SubmitStatus::RejectedDuplicateId;
+
+                if (!rejectedBeforeDispatch) {
+                    publishOutbound(ipc::orderUpdateEvent(
+                        ipc::UpdateAction::Cancelled, oldResult.side,
+                        ipc::OrderUpdate{cmd.id, oldResult.price, oldResult.quantity,
+                                         oldResult.remaining, oldResult.participant, oldResult.seq},
+                        dispatchSeq_));
+                }
                 publishTrades(buf);
+                publishStpVictims(victims);
                 publishOutbound(ipc::statusEvent(cmd.newId, r.status, dispatchSeq_));
+                if (!rejectedBeforeDispatch) {
+                    emitOrderUpdate(cmd.newId, fresh.side, r);
+                }
                 break;
             }
+        }
+    }
+
+    // Turns each order self-trade-prevention silently removed (StpPolicy::CancelPassive/
+    // CancelBoth) into the OrderUpdate{Cancelled} the L3 stream needs -- see StpVictimBuffer's
+    // doc. Emitted between trades and the primary order's own OrderUpdate, matching the order
+    // matchInto() actually removes them in.
+    void publishStpVictims(StpVictimBuffer& victims) {
+        for (std::size_t i = 0; i < victims.count && i < victims.capacity; ++i) {
+            const StpVictim& v = victims.data[i];
+            publishOutbound(ipc::orderUpdateEvent(
+                ipc::UpdateAction::Cancelled, v.side,
+                ipc::OrderUpdate{v.id, v.price, v.quantity, v.remaining, v.participant, v.seq},
+                dispatchSeq_));
+        }
+    }
+
+    // New/Replace share the same "what happened to the (new) order" tail: it either joined the
+    // book (Rested) or it didn't. The "didn't" branch is ALWAYS UpdateAction::Rejected --
+    // including the status==Ok case (fully filled with nothing left to rest) -- because this id
+    // never entered the book at all, so BookMirror must treat it as a pure no-op. Using
+    // Cancelled here (which erases) was a real bug: with a small id pool a rejected/fully-filled
+    // command's id can coincide with a DIFFERENT order that is still genuinely resting under
+    // that same numeric id, and Cancelled would wrongly erase it from the mirror even though the
+    // real book never touched it.
+    void emitOrderUpdate(OrderId id, Side side, const OrderResult& r) {
+        const ipc::OrderUpdate u{id, r.price, r.quantity, r.remaining, r.participant, r.seq};
+        if (r.rested) {
+            publishOutbound(
+                ipc::orderUpdateEvent(ipc::UpdateAction::Rested, r.side, u, dispatchSeq_));
+        } else {
+            publishOutbound(ipc::orderUpdateEvent(ipc::UpdateAction::Rejected, side, u,
+                                                  dispatchSeq_, r.status));
         }
     }
 
