@@ -118,6 +118,12 @@ class GatewayServer {
     void doAccept() {
         acceptor_.async_accept([this](std::error_code ec, asio::ip::tcp::socket socket) {
             if (!ec) {
+                // Every message on this protocol (NEW_ORDER, EXEC_REPORT, ...) is small and its
+                // own frame -- Nagle's algorithm coalescing them with delayed ACKs turns a
+                // sub-millisecond exec report into a multi-millisecond one for no reason a
+                // latency-focused gateway should ever accept.
+                std::error_code ndEc;
+                socket.set_option(asio::ip::tcp::no_delay(true), ndEc);
                 auto session = std::make_shared<ClientSession>(std::move(socket), *this,
                                                                instrumentId_, minPrice_, maxPrice_);
                 sessions_.push_back(session);

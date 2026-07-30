@@ -58,6 +58,33 @@ with them everywhere:
   second is physically impossible on any storage device. That caveat is permanent and is stated
   everywhere the number appears.
 
+## End-to-end latency (Spec 009)
+
+The number above is the matching call in isolation. This is the **real order-to-match figure**,
+driven through the actual ring → matching thread → outbound path by a rate-driven load generator
+(`velox_loadgen`) against an intended schedule, with `hdr_record_corrected_value()` correcting for
+coordinated omission — see `.claude/skills/benchmark-methodology/SKILL.md` for why that correction
+is mandatory, and `tests/bench/co_correction_test.cpp` for the test that proves it is actually on.
+
+![latency distribution](benchmarks/plots/latency-e2e_ring_steady.png)
+
+Three paths, never blended (constitution Principle 6 — never let one flattering path stand in for
+all three):
+
+| path | what's measured | durable? | TCP? | p50 | p99 | gated? |
+|---|---|---|---|---|---|---|
+| `engine` | ring → matching thread → outbound ring | no | no | ~0.3 µs | ~34 µs | **yes**, vs baseline |
+| `durable` | as `engine`, plus Sequencer + JournalWriter fsync | **yes** (`F_FULLFSYNC`) | no | ~3.6 ms | ~8.3 ms | no — fsync-bound |
+| `wire` | real `GatewayServer`, real wire protocol, loopback TCP | yes | **yes** | ~4.0 ms | ~28.9 ms | no — TCP+fsync-bound |
+
+These `durable`/`wire` figures are illustrative smoke-test numbers from this dev machine, not a
+promoted baseline — only `/perf-baseline` promotes a number into the regression gate. The `engine`
+path is the only one whose p99 can live inside the ≤20 µs budget; `durable` and `wire` are
+fsync-per-record dominated by construction (`FsyncPolicy::PerRecord` — see
+`sequencer/journal_writer.hpp`), and reporting a fast number for either would misrepresent what a
+durable or wire-connected client actually experiences. Run `./build/benchmark/velox_loadgen
+--path=<path> --rate=<N> --samples=<N>` to reproduce; `/bench` runs and gates the `engine` scenario.
+
 ## Build and run
 
 ```bash

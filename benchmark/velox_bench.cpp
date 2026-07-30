@@ -22,49 +22,16 @@
 #include <vector>
 
 #include "engine/order_book.hpp"
+#include "loadgen/workload.hpp"
 #include "platform/platform.hpp"
 
 using namespace velox;
+// Spec 009 T1: makeConfig()/populate() used to be defined here (and separately, with drift
+// risk, in velox_ring_bench.cpp) -- both now live in loadgen/workload.hpp, shared by every
+// path driver plus this file.
+using namespace velox::loadgen;
 
 namespace {
-
-constexpr Price kMid = 100 * kPriceScale;
-constexpr Price kTick = kPriceScale / 100;
-
-BookConfig makeConfig() {
-    BookConfig cfg;
-    cfg.minPrice = 1 * kPriceScale;
-    cfg.maxPrice = 200 * kPriceScale;
-    cfg.tick = kTick;
-    cfg.maxOrders = 1u << 20;
-    return cfg;
-}
-
-// Build a book with real depth on both sides. Matching against an empty book measures the
-// trivial path and tells you nothing.
-void populate(OrderBook& book, OrderId& id, TradeBuffer& buf, int levelsPerSide) {
-    for (int i = 1; i <= levelsPerSide; ++i) {
-        buf.clear();
-        NewOrder bid{
-            .id = id++,
-            .price = kMid - kTick * i,
-            .quantity = 100,
-            .participant = 1,
-            .side = Side::Buy,
-        };
-        book.submit(bid, buf);
-
-        buf.clear();
-        NewOrder ask{
-            .id = id++,
-            .price = kMid + kTick * i,
-            .quantity = 100,
-            .participant = 1,
-            .side = Side::Sell,
-        };
-        book.submit(ask, buf);
-    }
-}
 
 // --- Google Benchmark: throughput of the matching call ------------------------------------
 

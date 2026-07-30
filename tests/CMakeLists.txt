@@ -111,6 +111,17 @@ target_link_libraries(velox_marketdata_tests PRIVATE velox_marketdata velox_engi
 target_include_directories(velox_marketdata_tests PRIVATE ${CMAKE_SOURCE_DIR})
 gtest_discover_tests(velox_marketdata_tests PROPERTIES LABELS "marketdata")
 
+# --- bench (Spec 009: "test the test" -- the CO-correction proof) ----------------------------
+add_executable(velox_co_correction_test
+    bench/co_correction_test.cpp
+)
+target_link_libraries(velox_co_correction_test PRIVATE velox_gateway_lib velox_marketdata
+                                                       velox_sequencer hdr_histogram_static
+                                                       GTest::gtest_main Threads::Threads)
+target_include_directories(velox_co_correction_test PRIVATE ${CMAKE_SOURCE_DIR}/benchmark
+                                                            ${hdrhistogram_SOURCE_DIR}/include)
+gtest_discover_tests(velox_co_correction_test PROPERTIES LABELS "co" TIMEOUT 120)
+
 # --- structural (mechanical proofs, not tests of behavior) -----------------------------------
 
 # T1.2: engine/ and book/ headers must compile without exception support or RTTI. If a hot-path

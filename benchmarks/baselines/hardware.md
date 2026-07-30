@@ -58,3 +58,32 @@ shim already implements all of it behind `#ifdef __linux__`.
 Publish **both** sets of numbers, clearly labeled. The macOS numbers are honest numbers on a shared
 core; the Linux numbers will be the tuned ones. Presenting the tuned figure while having measured the
 shared one is the exact dishonesty this project is built to avoid.
+
+## Load generator (Spec 009) — additional caveats
+
+- **The measured span ends when the READER THREAD observes the event**, not when the matching
+  thread publishes it. It therefore includes reader wakeup latency and the outbound-ring publish
+  itself, and is a strict superset of pure order-to-match for the `engine`/`durable` paths.
+  Pessimistic, which is the acceptable direction.
+- **Every run prints a `corrected` AND a `naive` histogram, side by side.** The naive figure is
+  what a rate-driven loop would report if it started the clock at actual-send time instead of
+  intended-send time; it is always the *optimistic-when-wrong* one. Only the corrected figure is
+  ever a reportable result. `tests/bench/co_correction_test.cpp` is the proof the correction is
+  actually doing something, not just present in the code.
+- **`wire`'s p99 is TCP- and sequencer-round-trip dominated, not gated, and can be OUTSIDE the
+  general "pessimistic span" rule above.** `gateway/session.cpp`'s `sendNewAckIfApplicable()` sends
+  the NEW_ACK synchronously the instant the sequencer durably assigns a sequence number — before
+  the matching thread has necessarily dispatched the command at all. So the `wire` path's
+  "first EXEC_REPORT/REJECT" completion marker can UNDERSTATE true order-to-match for a resting
+  order. This is a structural property of the wire protocol's hot-path-friendly design (no
+  StatusEvent published for a successful New), not a bug in the harness.
+- **`durable` and `wire` are both fsync-per-record dominated** (`F_FULLFSYNC` on macOS,
+  `FsyncPolicy::PerRecord` — `sequencer/journal_writer.hpp`), typically limiting achieved
+  throughput to a few hundred orders/sec on this machine. That is the honest number for a
+  durability-preserving path on this hardware, not a harness defect — see
+  `progress_report.md` for the measured figures.
+- Both the gateway's accepted sockets and the load generator's client socket set `TCP_NODELAY`
+  (`gateway/gateway.hpp`'s `doAccept()`, `benchmark/loadgen/wire_harness.hpp`'s `LoadgenClient`).
+  Without it, Nagle's algorithm combined with delayed ACKs coalesces this protocol's small,
+  latency-sensitive frames into a multi-millisecond-per-message trickle that has nothing to do
+  with the engine, the journal, or genuine network latency.

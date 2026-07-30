@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      # Hard failures: correctness, determinism, zero-alloc, and recovery must never regress.
+      - name: Unit / replay / invariant / alloc_check / recovery / co
+        run: ctest --test-dir build -L "unit|replay|invariant|alloc_check|recovery|co" --output-on-failure
+
+      # The perf gate is ADVISORY here, deliberately (Spec 009 T7): a shared cloud vCPU has no
+      # core isolation, no frequency pinning, and shares its cache with an unknown number of
+      # other tenants' jobs -- it cannot support the 20% p99 regression gate that /bench enforces
+      # locally on the hardware in benchmarks/baselines/hardware.md. A gate that flakes on noisy
+      # shared infrastructure gets ignored by habit, which is worse than having no gate at all.
+      # The authoritative gate is `/bench` / `scripts/bench_gate.sh`, run locally.
+      - name: Benchmark regression gate (report-only)
+        run: scripts/bench_gate.sh --report-only
+        continue-on-error: true

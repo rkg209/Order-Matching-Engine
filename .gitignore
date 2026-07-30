@@ -12,6 +12,8 @@ snapshots/
 # Benchmark output (baselines ARE committed; raw runs are not)
 benchmarks/runs/
 benchmarks/plots/*.png
+# Spec 009: the README centerpiece plot IS committed.
+!benchmarks/plots/latency-e2e_ring_steady.png
 
 # Frontend
 node_modules/

@@ -20,41 +20,17 @@
 #include "ipc/multicast_ring.hpp"
 #include "ipc/outbound_event.hpp"
 #include "ipc/spsc_ring.hpp"
+#include "loadgen/workload.hpp"
 #include "platform/platform.hpp"
 #include "runtime/matching_thread.hpp"
 
 using namespace velox;
+// Spec 009 T1: makeConfig()/steadyStateCommand() used to be defined here (and separately, with
+// drift risk, in velox_bench.cpp) -- both now live in loadgen/workload.hpp, and every path
+// driver plus this file share the one definition.
+using namespace velox::loadgen;
 
 namespace {
-
-constexpr Price kMid = 100 * kPriceScale;
-constexpr Price kTick = kPriceScale / 100;
-
-BookConfig makeConfig() {
-    BookConfig cfg;
-    cfg.minPrice = 1 * kPriceScale;
-    cfg.maxPrice = 200 * kPriceScale;
-    cfg.tick = kTick;
-    cfg.maxOrders = 1u << 20;
-    return cfg;
-}
-
-// Same steady-state rest/cross alternation as velox_bench.cpp's BM_SubmitRestingOrder: net pool
-// usage per pair is zero, so the book never grows and the pool is never exhausted. Copied
-// deliberately (progress_report.md [005] already paid for the lesson that a benchmark which
-// degrades into measuring RejectedPoolExhausted is worse than none).
-ipc::Command steadyStateCommand(OrderId id, bool rest) {
-    ipc::Command c{};
-    c.id = id;
-    c.newId = 0;
-    c.price = kMid - kTick;
-    c.quantity = 10;
-    c.participant = rest ? 2 : 3;
-    c.kind = ipc::CommandKind::New;
-    c.side = rest ? Side::Buy : Side::Sell;
-    c.type = OrderType::Limit;
-    return c;
-}
 
 // --- T4: the outbound A/B --------------------------------------------------------------------
 //
