@@ -143,6 +143,23 @@ target_compile_definitions(velox_viz_lib PUBLIC
 )
 
 # ---------------------------------------------------------------------------------------------
+# REST admin API (Spec 013, revived at narrow read-only scope): velox_adminctl, a standalone
+# JWT-authenticated HTTP/JSON daemon that observes the journal/snapshot directories off disk.
+# Zero external dependencies (hand-rolled HMAC-SHA256, not jwt-cpp+OpenSSL) precisely so it needs
+# no option() gate -- unlike velox_audit below, it builds by default. Off the hot path entirely --
+# does not link velox_engine, velox_runtime, or velox_gateway, and never touches a live OrderBook
+# (see admin/API.md's "source":"disk" caveat and constitution.md v1.2).
+# ---------------------------------------------------------------------------------------------
+add_library(velox_admin
+    admin/jwt.cpp
+    admin/store.cpp
+    admin/http_server.cpp
+    admin/routes.cpp
+)
+target_include_directories(velox_admin PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(velox_admin PUBLIC velox_sequencer velox_asio)
+
+# ---------------------------------------------------------------------------------------------
 # Tier-3 audit tier (Spec 012): a derived, queryable Postgres projection of the journal, built by
 # a SEPARATE process (velox_auditd) that reads journal files off disk. OFF by default -- this is
 # the first option() in the repo, and it stays that way deliberately: everything above this line

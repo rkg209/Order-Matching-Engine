@@ -1,11 +1,9 @@
 #include "viz/ws_server.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <sstream>
-#include <unordered_map>
 
+#include "common/http_parse.hpp"
 #include "viz/base64.hpp"
 #include "viz/sha1.hpp"
 
@@ -13,36 +11,10 @@ namespace velox::viz {
 
 namespace {
 
+using velox::common::parseHeaders;
+using velox::common::toLower;
+
 constexpr const char* kWsMagicGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
-std::string toLower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-    return s;
-}
-
-std::string trim(const std::string& s) {
-    std::size_t a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return "";
-    std::size_t b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
-
-// Splits a raw "\r\n"-delimited HTTP header block (request line already stripped) into a
-// lower-cased-key map. Not a general-purpose HTTP parser -- just enough to find the handful of
-// headers the WS handshake and static-file path need.
-std::unordered_map<std::string, std::string> parseHeaders(const std::string& block) {
-    std::unordered_map<std::string, std::string> headers;
-    std::istringstream ss(block);
-    std::string line;
-    while (std::getline(ss, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
-        const std::size_t colon = line.find(':');
-        if (colon == std::string::npos) continue;
-        headers[toLower(trim(line.substr(0, colon)))] = trim(line.substr(colon + 1));
-    }
-    return headers;
-}
 
 }  // namespace
 

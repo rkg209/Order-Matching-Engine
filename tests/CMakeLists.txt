@@ -159,6 +159,31 @@ target_compile_definitions(velox_shard_tests
 )
 gtest_discover_tests(velox_shard_tests PROPERTIES LABELS "shard" TIMEOUT 60)
 
+# --- admin (Spec 013: REST admin API, revived at narrow read-only scope) -----------------------
+add_executable(velox_admin_tests
+    admin/hmac_test.cpp
+    admin/base64url_test.cpp
+    admin/jwt_test.cpp
+    admin/routes_test.cpp
+)
+target_link_libraries(velox_admin_tests PRIVATE velox_admin GTest::gtest_main Threads::Threads)
+target_include_directories(velox_admin_tests PRIVATE ${CMAKE_SOURCE_DIR})
+gtest_discover_tests(velox_admin_tests PROPERTIES LABELS "admin")
+
+# Spawns the real velox_adminctl binary against a journal directory produced by a real
+# velox_gateway run -- same "drive the real binaries" pattern as gateway/e2e_test.cpp.
+add_executable(velox_admin_e2e_test admin/e2e_test.cpp)
+target_link_libraries(velox_admin_e2e_test PRIVATE velox_admin velox_gateway_lib velox_protocol
+                                                    GTest::gtest_main Threads::Threads)
+target_include_directories(velox_admin_e2e_test PRIVATE ${CMAKE_SOURCE_DIR})
+add_dependencies(velox_admin_e2e_test velox_gateway velox_adminctl)
+target_compile_definitions(velox_admin_e2e_test
+    PRIVATE VELOX_GATEWAY_BIN="$<TARGET_FILE:velox_gateway>"
+            VELOX_ADMINCTL_BIN="$<TARGET_FILE:velox_adminctl>"
+)
+add_test(NAME Admin.E2E COMMAND velox_admin_e2e_test)
+set_tests_properties(Admin.E2E PROPERTIES LABELS "admin" TIMEOUT 60)
+
 # --- bench (Spec 009: "test the test" -- the CO-correction proof) ----------------------------
 add_executable(velox_co_correction_test
     bench/co_correction_test.cpp
@@ -229,3 +254,13 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME Structural.HotPathForbiddenConstructs
          COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/structural/hot_path_grep_test.py)
 set_tests_properties(Structural.HotPathForbiddenConstructs PROPERTIES LABELS "unit")
+
+# Spec 013 T7: velox_adminctl must never write to the filesystem it observes -- grepped, not
+# just reviewed. See tests/structural/admin_readonly_test.cpp.
+add_executable(velox_admin_readonly_test structural/admin_readonly_test.cpp)
+target_link_libraries(velox_admin_readonly_test PRIVATE GTest::gtest_main)
+target_compile_definitions(velox_admin_readonly_test
+    PRIVATE VELOX_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+add_test(NAME Structural.AdminReadOnly COMMAND velox_admin_readonly_test)
+set_tests_properties(Structural.AdminReadOnly PROPERTIES LABELS "admin")
