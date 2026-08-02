@@ -145,6 +145,54 @@ gets a byte-identical match against the single-shard golden file.
   `<root>/shard-1/` by hand — recovery from the old flat layout is deliberately not silently
   supported.
 
+## Tier-3 Postgres audit tier (Spec 012)
+
+The journal answers "did order X match" by replaying a binary file through a C++ program. It
+does not answer "what did participant 7 do yesterday" in any form a human can query. `velox_auditd`
+is a **separate, opt-in process** that tails a shard's journal off disk, replays it through a
+shadow `OrderBook` (the same pattern `SnapshotThread` already uses for recovery), and writes
+append-only rows into Postgres — a derived, queryable *projection* of the journal, never a second
+source of truth.
+
+The seam is the filesystem. `engine/`, `book/`, `ipc/`, `runtime/`, `gateway/`, and `marketdata/`
+are untouched by this spec and do not link, include, or know about anything under `audit/` — kill
+Postgres, kill `velox_auditd`, delete the database, and the matching engine does not observe any
+of it, because there is nothing wired up to observe.
+
+```bash
+cmake -B build -G Ninja -DVELOX_BUILD_AUDIT_TIER=ON     # OFF by default; requires libpq
+cmake --build build
+
+psql -f audit/sql/001_init.sql <db>                      # velox_audit schema: 5 tables + 1 view
+./build/apps/velox_auditd --journal=DIR --shards=1,2,3 --pg=<conninfo> \
+                           [--batch=1000] [--poll-ms=50] [--from-scratch]
+
+ctest --test-dir build -L audit                           # tailer + replayer determinism run with
+                                                           # no database; the two ingest/isolation
+                                                           # tests need VELOX_TEST_PG_CONNINFO set
+                                                           # and GTEST_SKIP() cleanly without it
+```
+
+**Honest limits, stated rather than hidden:**
+- **Not durability, not a source of truth.** The journal remains the sole durability mechanism
+  (constitution CON-8, amended — see `progress_report.md` [018]). The audit tier may lag
+  arbitrarily behind the journal tail; it never blocks, throttles, or is waited on by anything on
+  the order-entry path.
+- **No cross-instrument ordering.** Each shard's rows are consistent within that shard
+  (`global_seq` order); there is no total order across shards, matching the sharding model's own
+  stated limit above.
+- **No credentials, no risk limits, no telemetry tables.** `velox_audit` only has tables for what
+  the engine actually emits — see `audit/sql/001_init.sql`'s header comment for the full list of
+  what was deliberately left out and why.
+- **`ingested_at`, never a trade time.** Nothing in `ipc::Command`/`Trade`/`OutboundEvent` carries
+  a wall-clock timestamp — `global_seq` (ring-arrival order) is the only ordering key the schema
+  has, by design (constitution P4, determinism).
+- **Measured, not assumed, overhead**: `tests/audit/engine_isolation_test.cpp` runs the same
+  order-entry workload with and without `velox_auditd` attached to the live journal and reports
+  the real p99 delta — see `progress_report.md` [019] for the number measured on this hardware.
+  It is not exactly zero (a second process reading the same files contends for page cache and
+  disk I/O), and it is reported as such rather than rounded down to "no impact".
+
 ## Build and run
 
 ```bash
@@ -158,11 +206,13 @@ ctest --test-dir build -L alloc_check   # must report 0 bytes/op
 ctest --test-dir build -L recovery      # journal/snapshot/sequencer + a real SIGKILL-and-recover
 ctest --test-dir build -L viz           # visualizer: handshake, ladder, zero-bytes, replay determinism
 ctest --test-dir build -L shard         # per-shard determinism + isolation (Spec 011)
+ctest --test-dir build -L audit         # Tier-3 audit tier (Spec 012, opt-in build, see above)
 ./build/benchmark/velox_bench           # p50/p99/p999
 ./build/benchmark/velox_alloc_check     # must report 0 bytes/op
 ```
 
-Requires CMake ≥ 3.24, Ninja, and a C++20 compiler. Nothing else — no vcpkg, no Conan.
+Requires CMake ≥ 3.24, Ninja, and a C++20 compiler. Nothing else — no vcpkg, no Conan. The audit
+tier is the one opt-in exception: `-DVELOX_BUILD_AUDIT_TIER=ON` additionally requires libpq.
 
 ## Recovery (Spec 006)
 

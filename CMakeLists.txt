@@ -143,6 +143,27 @@ target_compile_definitions(velox_viz_lib PUBLIC
 )
 
 # ---------------------------------------------------------------------------------------------
+# Tier-3 audit tier (Spec 012): a derived, queryable Postgres projection of the journal, built by
+# a SEPARATE process (velox_auditd) that reads journal files off disk. OFF by default -- this is
+# the first option() in the repo, and it stays that way deliberately: everything above this line
+# builds with zero external dependencies beyond what FetchContent pulls, and that promise does
+# not change unless a developer explicitly opts in here. See constitution.md CON-8 (amended
+# 2026-08-02, progress_report.md [018]) and .claude/plans/012-postgres-audit-tier.md.
+# ---------------------------------------------------------------------------------------------
+option(VELOX_BUILD_AUDIT_TIER "Build the Tier-3 Postgres audit tier (Spec 012)" OFF)
+if(VELOX_BUILD_AUDIT_TIER)
+    find_package(PostgreSQL REQUIRED)  # clear configure-time failure if libpq is absent
+    add_library(velox_audit
+        audit/pg_writer.cpp
+    )
+    target_include_directories(velox_audit PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(velox_audit
+        PUBLIC velox_engine velox_sequencer
+        PRIVATE PostgreSQL::PostgreSQL
+    )
+endif()
+
+# ---------------------------------------------------------------------------------------------
 # Tests. CTest labels are fixed by NFR-32: unit, replay, invariant, bench, alloc_check.
 # recovery (Spec 006) is a new label added to that set.
 # ---------------------------------------------------------------------------------------------

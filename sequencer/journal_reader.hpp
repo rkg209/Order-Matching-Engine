@@ -77,15 +77,92 @@ class JournalReader {
     Seq lastGoodSeq() const noexcept { return lastGoodSeq_; }
     std::size_t segmentCount() const noexcept { return segments_.size(); }
 
- private:
-    bool openNextSegment() {
-        if (nextSegmentIdx_ >= segments_.size()) {
-            return false;
+    // --- Additive members (Spec 012): a live tailer's needs, layered on top of the original
+    // forward-only, one-shot contract above. None of the three change what already existed.
+
+    // Pick up segments the writer has created since construction (or the last rescan). A live
+    // JournalWriter rolls to a new file only after sealing the previous one, so newly-discovered
+    // paths always sort after everything already known here -- appending is sufficient, no
+    // re-sort of the whole list is needed.
+    void rescan() {
+        if (!std::filesystem::exists(dir_)) {
+            return;
         }
-        currentPath_ = segments_[nextSegmentIdx_++];
+        std::vector<std::filesystem::path> found;
+        for (const auto& e : std::filesystem::directory_iterator(dir_)) {
+            if (e.is_regular_file() && e.path().extension() == ".jnl") {
+                // JournalWriter::openSegment() creates the file (making it listable here) BEFORE
+                // its 32-byte header write lands. openSegmentAtIndex() treats a too-small header
+                // as "corrupt, skip forever" -- correct for the one-shot recovery/snapshot
+                // readers this class also serves (by the time they run, the writer is long past
+                // this point), wrong for a live tailer racing the writer. Deferring visibility
+                // here until the header is actually complete means openNextSegment()/seekTo()
+                // are never even asked to open a segment mid-header-write; it simply shows up on
+                // a later rescan() once ready.
+                std::error_code ec;
+                const auto sz = std::filesystem::file_size(e.path(), ec);
+                if (ec || sz < SegmentHeader::kSize) {
+                    continue;
+                }
+                found.push_back(e.path());
+            }
+        }
+        std::sort(found.begin(), found.end());
+        const std::filesystem::path lastKnown =
+            segments_.empty() ? std::filesystem::path{} : segments_.back();
+        for (auto& p : found) {
+            if (segments_.empty() || p > lastKnown) {
+                segments_.push_back(std::move(p));
+            }
+        }
+    }
+
+    // Re-stat the currently open segment. `fileSize_` is otherwise a snapshot taken at open
+    // time (by design, for the one-shot recovery/snapshot readers) -- a live tailer that hit
+    // what looked like clean EOF needs to know whether the writer has appended more bytes since.
+    void refreshFileSize() {
+        if (fd_ < 0) {
+            return;
+        }
+        struct stat st{};
+        if (::fstat(fd_, &st) == 0) {
+            fileSize_ = static_cast<std::size_t>(st.st_size);
+        }
+    }
+
+    // Resume from a checkpoint without re-reading history. Unlike openNextSegment() (which only
+    // ever moves forward through segments_ and never revisits one), this re-derives position
+    // from scratch by createdCounter: a live tailer may have had its fd closed after a stale
+    // clean-EOF on a segment that kept growing after that check, so "resume" here means "reopen
+    // the checkpointed segment fresh", not "trust the cached fd/offset". Returns false if no
+    // segment with a matching createdCounter is present.
+    bool seekTo(std::uint64_t createdCounter, std::size_t offset, Seq lastGoodSeq) {
+        closeCurrent();
+        lastGoodSeq_ = lastGoodSeq;
+        for (std::size_t idx = 0; idx < segments_.size(); ++idx) {
+            if (!openSegmentAtIndex(idx)) {
+                continue;
+            }
+            if (currentCreatedCounter_ == createdCounter) {
+                nextSegmentIdx_ = idx + 1;
+                offset_ = offset;
+                return true;
+            }
+            closeCurrent();
+        }
+        nextSegmentIdx_ = segments_.size();
+        return false;
+    }
+
+ private:
+    // Opens segments_[idx] directly (does not consult or advance nextSegmentIdx_), decoding its
+    // header. Shared by openNextSegment() (sequential, forward-only) and seekTo() (direct, by
+    // createdCounter) so both apply the exact same header-validation/skip-on-corruption rules.
+    bool openSegmentAtIndex(std::size_t idx) {
+        currentPath_ = segments_[idx];
         fd_ = ::open(currentPath_.c_str(), O_RDONLY);
         if (fd_ < 0) {
-            return openNextSegment();
+            return false;
         }
         struct stat st{};
         ::fstat(fd_, &st);
@@ -95,17 +172,27 @@ class JournalReader {
         if (fileSize_ < SegmentHeader::kSize ||
             ::read(fd_, hbuf, SegmentHeader::kSize) != static_cast<ssize_t>(SegmentHeader::kSize)) {
             closeCurrent();
-            return openNextSegment();
+            return false;
         }
         SegmentHeader h;
         if (!h.decode(hbuf)) {
             closeCurrent();
-            return openNextSegment();
+            return false;
         }
         currentFirstSeq_ = static_cast<Seq>(h.firstSeq);
         currentCreatedCounter_ = h.createdCounter;
         offset_ = SegmentHeader::kSize;
         return true;
+    }
+
+    bool openNextSegment() {
+        while (nextSegmentIdx_ < segments_.size()) {
+            const std::size_t idx = nextSegmentIdx_++;
+            if (openSegmentAtIndex(idx)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     ReadResult readOneRecord() {

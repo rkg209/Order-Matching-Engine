@@ -9,3 +9,8 @@ target_link_libraries(velox_client PRIVATE velox_protocol velox_asio)
 
 add_executable(velox_viz velox_viz.cpp)
 target_link_libraries(velox_viz PRIVATE velox_viz_lib)
+
+if(VELOX_BUILD_AUDIT_TIER)
+    add_executable(velox_auditd velox_auditd.cpp)
+    target_link_libraries(velox_auditd PRIVATE velox_audit)
+endif()

@@ -170,6 +170,49 @@ target_include_directories(velox_co_correction_test PRIVATE ${CMAKE_SOURCE_DIR}/
                                                             ${hdrhistogram_SOURCE_DIR}/include)
 gtest_discover_tests(velox_co_correction_test PROPERTIES LABELS "co" TIMEOUT 120)
 
+# --- audit (Spec 012: Tier-3 Postgres audit tier) ----------------------------------------------
+# Same guard as velox_audit/velox_auditd (CMakeLists.txt) -- OFF by default, so the default test
+# sweep never links libpq and is unaffected by this spec existing.
+if(VELOX_BUILD_AUDIT_TIER)
+    add_executable(velox_audit_tests
+        audit/tailer_test.cpp
+        audit/replayer_determinism_test.cpp
+        audit/idempotent_ingest_test.cpp
+    )
+    # PostgreSQL::PostgreSQL is linked directly here (not just via velox_audit, which keeps it
+    # PRIVATE) because idempotent_ingest_test.cpp needs libpq itself to load the schema and
+    # inspect rows for its fixture -- a test-only exception to "pg_writer.cpp is the only libpq
+    # TU", which is about the shipped audit tier, not its test harness.
+    target_link_libraries(velox_audit_tests PRIVATE velox_audit PostgreSQL::PostgreSQL
+                                                     GTest::gtest_main Threads::Threads)
+    target_include_directories(velox_audit_tests PRIVATE ${CMAKE_SOURCE_DIR})
+    target_compile_definitions(velox_audit_tests
+        PRIVATE VELOX_REPLAY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/replay"
+                VELOX_AUDIT_SQL_INIT="${CMAKE_SOURCE_DIR}/audit/sql/001_init.sql"
+    )
+    gtest_discover_tests(velox_audit_tests PROPERTIES LABELS "audit")
+
+    # Spawns the real velox_gateway + velox_loadgen + velox_auditd binaries and SIGKILLs
+    # Postgres mid-stream -- same "drive the real binary" pattern as recover_sigkill_test.cpp /
+    # gateway/e2e_test.cpp.
+    add_executable(velox_audit_isolation_test audit/engine_isolation_test.cpp)
+    target_link_libraries(velox_audit_isolation_test PRIVATE velox_audit velox_gateway_lib
+                                                              velox_marketdata PostgreSQL::PostgreSQL
+                                                              GTest::gtest_main Threads::Threads)
+    target_include_directories(velox_audit_isolation_test PRIVATE ${CMAKE_SOURCE_DIR})
+    target_compile_definitions(velox_audit_isolation_test
+        PRIVATE VELOX_AUDIT_SQL_INIT="${CMAKE_SOURCE_DIR}/audit/sql/001_init.sql"
+    )
+    add_dependencies(velox_audit_isolation_test velox_gateway velox_loadgen velox_auditd)
+    target_compile_definitions(velox_audit_isolation_test PRIVATE
+        VELOX_GATEWAY_BIN="$<TARGET_FILE:velox_gateway>"
+        VELOX_LOADGEN_BIN="$<TARGET_FILE:velox_loadgen>"
+        VELOX_AUDITD_BIN="$<TARGET_FILE:velox_auditd>"
+    )
+    add_test(NAME Audit.EngineIsolation COMMAND velox_audit_isolation_test)
+    set_tests_properties(Audit.EngineIsolation PROPERTIES LABELS "audit" TIMEOUT 300)
+endif()
+
 # --- structural (mechanical proofs, not tests of behavior) -----------------------------------
 
 # T1.2: engine/ and book/ headers must compile without exception support or RTTI. If a hot-path
