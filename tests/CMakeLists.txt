@@ -72,11 +72,26 @@ add_executable(velox_gateway_tests
     gateway/session_test.cpp
     gateway/routing_test.cpp
     gateway/backpressure_test.cpp
+    gateway/multi_instrument_routing_test.cpp
 )
 target_link_libraries(velox_gateway_tests PRIVATE velox_gateway_lib velox_protocol
                                                    GTest::gtest_main Threads::Threads)
 target_include_directories(velox_gateway_tests PRIVATE ${CMAKE_SOURCE_DIR})
 gtest_discover_tests(velox_gateway_tests PROPERTIES LABELS "gateway")
+
+# Spec 011 T9.4: the routes_ race fix (gateway/gateway.hpp's ShardCtx::routesMutex), rebuilt
+# under ThreadSanitizer -- same pattern as velox_spsc_tsan_test. Many concurrent sessions submit
+# orders across multiple shards while the router threads concurrently route exec reports back,
+# so registerRoute/eraseRoute (io thread) and routeExecReport/routeReject (router threads) race
+# on each shard's routes_ map unless the mutex actually protects it.
+add_executable(velox_gateway_routes_tsan_test gateway/routes_race_tsan_test.cpp)
+target_link_libraries(velox_gateway_routes_tsan_test PRIVATE velox_gateway_lib velox_protocol
+                                                             GTest::gtest_main Threads::Threads)
+target_include_directories(velox_gateway_routes_tsan_test PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(velox_gateway_routes_tsan_test PRIVATE -fsanitize=thread -g -O1)
+target_link_options(velox_gateway_routes_tsan_test PRIVATE -fsanitize=thread)
+add_test(NAME Gateway.RoutesRaceTsan COMMAND velox_gateway_routes_tsan_test)
+set_tests_properties(Gateway.RoutesRaceTsan PROPERTIES LABELS "tsan" TIMEOUT 120)
 
 # Fuzz pass built with -fsanitize=address,undefined (NFR-27, DoD 4) -- a buffer overrun or UB in
 # the decoder must fail loudly here, not survive into production.
@@ -131,6 +146,18 @@ target_compile_definitions(velox_viz_replay_determinism_test
 )
 add_test(NAME Viz.ReplayDeterminism COMMAND velox_viz_replay_determinism_test)
 set_tests_properties(Viz.ReplayDeterminism PROPERTIES LABELS "viz" TIMEOUT 60)
+
+# --- shard (Spec 011: multi-instrument sharding) -----------------------------------------------
+add_executable(velox_shard_tests
+    shard/determinism_test.cpp
+    shard/isolation_test.cpp
+)
+target_link_libraries(velox_shard_tests PRIVATE velox_sequencer GTest::gtest_main Threads::Threads)
+target_include_directories(velox_shard_tests PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_definitions(velox_shard_tests
+    PRIVATE VELOX_REPLAY_DIR="${CMAKE_CURRENT_SOURCE_DIR}/replay"
+)
+gtest_discover_tests(velox_shard_tests PROPERTIES LABELS "shard" TIMEOUT 60)
 
 # --- bench (Spec 009: "test the test" -- the CO-correction proof) ----------------------------
 add_executable(velox_co_correction_test

@@ -14,6 +14,7 @@
 // resynchronise a length-prefixed stream after a bad length, because that is guesswork, not
 // recovery.
 
+#include <array>
 #include <cstddef>
 
 #include "common/types.hpp"
@@ -21,6 +22,42 @@
 #include "protocol/messages.hpp"
 
 namespace velox::protocol {
+
+// A small, fixed-capacity set of instrument ids a gateway process will accept (Spec 011).
+// Off the hot path (this is a gateway/decoder-side concern, never touched by engine/ or book/),
+// so a linear scan over at most kMaxInstruments entries is deliberate -- it fits in one or two
+// cache lines and N is bounded by shard count, which is bounded by core count. Constructible from
+// a single InstrumentId (implicit) so every pre-Spec-011 call site (`FrameDecoder(1, lo, hi)`)
+// keeps compiling unchanged.
+class InstrumentSet {
+ public:
+    static constexpr std::size_t kMaxInstruments = 64;  // == runtime::kMaxShards
+
+    InstrumentSet() noexcept = default;
+    InstrumentSet(InstrumentId id) noexcept { add(id); }  // NOLINT(google-explicit-constructor)
+
+    void add(InstrumentId id) noexcept {
+        if (contains(id) || count_ >= kMaxInstruments) {
+            return;
+        }
+        ids_[count_++] = id;
+    }
+
+    bool contains(InstrumentId id) const noexcept {
+        for (std::size_t i = 0; i < count_; ++i) {
+            if (ids_[i] == id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::size_t size() const noexcept { return count_; }
+
+ private:
+    std::array<InstrumentId, kMaxInstruments> ids_{};
+    std::size_t count_ = 0;
+};
 
 // One decoded message, tagged by `type`. Only the member matching `type` is meaningful --
 // kept as a flat struct (not a union) because this is off the hot path and simplicity beats
@@ -46,11 +83,12 @@ class FrameDecoder {
 
     enum class Result { Ok, Incomplete, Invalid };
 
-    // instrumentId: the single configured instrument (decision 5 -- single-instrument until
-    // Spec 011). minPrice/maxPrice: BookConfig bounds, so a LIMIT price out of range is rejected
-    // here rather than reaching the engine.
-    FrameDecoder(InstrumentId instrumentId, Price minPrice, Price maxPrice) noexcept
-        : instrumentId_(instrumentId), minPrice_(minPrice), maxPrice_(maxPrice) {}
+    // instruments: the configured set of instrument ids this gateway process serves (Spec 011 --
+    // was a single id pre-sharding; InstrumentSet's implicit single-id constructor keeps every
+    // pre-existing call site compiling). minPrice/maxPrice: BookConfig bounds, so a LIMIT price
+    // out of range is rejected here rather than reaching the engine.
+    FrameDecoder(InstrumentSet instruments, Price minPrice, Price maxPrice) noexcept
+        : instruments_(instruments), minPrice_(minPrice), maxPrice_(maxPrice) {}
 
     // Appends bytes read from the socket. Returns false if this would overflow the fixed
     // reassembly buffer -- in valid protocol use this cannot happen (a partial frame is bounded
@@ -74,7 +112,7 @@ class FrameDecoder {
 
     void consume(std::size_t n) noexcept;
 
-    InstrumentId instrumentId_;
+    InstrumentSet instruments_;
     Price minPrice_;
     Price maxPrice_;
 

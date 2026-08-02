@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 
+#include "protocol/messages.hpp"
 #include "viz/md_client.hpp"
 #include "viz/snapshot_json.hpp"
 #include "viz/stats_client.hpp"
@@ -35,6 +36,10 @@ struct Args {
     std::string statsHostPort;
     std::string assetsDir = VELOX_VIZ_DEFAULT_ASSETS_DIR;
     std::size_t topN = 12;
+    // Spec 011 T5: 0 means "no filter" -- every instrument on the feed is shown, the
+    // pre-sharding behavior. A sharded gateway multiplexes N instruments on one md port, so a
+    // single-book viz needs to pick one.
+    protocol::InstrumentId instrument = 0;
 };
 
 bool takeArg(const std::string& arg, const std::string& key, std::string& out) {
@@ -58,6 +63,8 @@ Args parseArgs(int argc, char** argv) {
             a.assetsDir = tmp;
         } else if (takeArg(arg, "--top-n=", tmp)) {
             a.topN = std::stoull(tmp);
+        } else if (takeArg(arg, "--instrument=", tmp)) {
+            a.instrument = static_cast<protocol::InstrumentId>(std::stoul(tmp));
         }
     }
     return a;
@@ -78,7 +85,7 @@ int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     if (args.mdHostPort.empty()) {
         std::cerr << "usage: velox_viz --port=8080 --md=HOST:PORT [--stats=HOST:PORT] "
-                     "[--assets=DIR]\n";
+                     "[--assets=DIR] [--instrument=ID]\n";
         return 2;
     }
     std::string mdHost, mdPort;
@@ -92,7 +99,7 @@ int main(int argc, char** argv) {
     viz::WsServer wsServer(io, args.assetsDir);
     wsServer.listen(args.port);
 
-    viz::MdClient mdClient(io, mdHost, mdPort);
+    viz::MdClient mdClient(io, mdHost, mdPort, args.instrument);
     mdClient.start();
 
     std::unique_ptr<viz::StatsClient> statsClient;
@@ -133,7 +140,11 @@ int main(int argc, char** argv) {
     if (!args.statsHostPort.empty()) {
         std::cerr << " stats=" << args.statsHostPort;
     }
-    std::cerr << " assets=" << args.assetsDir << "\n";
+    std::cerr << " assets=" << args.assetsDir;
+    if (args.instrument != 0) {
+        std::cerr << " instrument=" << args.instrument;
+    }
+    std::cerr << "\n";
 
     io.run();
     return 0;

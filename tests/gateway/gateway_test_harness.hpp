@@ -4,6 +4,10 @@
 // routing_test, and backpressure_test. Runs a real GatewayServer against a real (loopback) TCP
 // socket in the same process -- lighter than spawning the actual binary (that is what
 // e2e_test.cpp is for), but still exercising the real asio session state machine end to end.
+//
+// Spec 011: GatewayServer is now built from a runtime::ShardSet. This harness defaults to a
+// single shard (instrument 1) so every pre-Spec-011 test keeps its exact behavior; multi-shard
+// gateway behavior is exercised separately in tests/gateway/multi_instrument_routing_test.cpp.
 
 #include <array>
 #include <asio.hpp>
@@ -12,19 +16,15 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "engine/order_book.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/gateway.hpp"
-#include "ipc/command.hpp"
-#include "ipc/outbound_event.hpp"
-#include "ipc/spsc_ring.hpp"
 #include "protocol/decoder.hpp"
 #include "protocol/encoder.hpp"
 #include "protocol/messages.hpp"
-#include "runtime/matching_thread.hpp"
-#include "sequencer/journal_writer.hpp"
-#include "sequencer/sequencer.hpp"
+#include "runtime/shard.hpp"
 
 namespace velox::gateway::test {
 
@@ -49,29 +49,38 @@ inline void makeToken(unsigned char byteValue, unsigned char out[32]) {
     for (int i = 0; i < 32; ++i) out[i] = byteValue;
 }
 
-// Spins up a full gateway (matching thread + journal + GatewayServer) bound to an OS-assigned
+// GatewayServer's constructor snapshots the shard set's instrumentSet() once, so every shard
+// must exist (though not necessarily be recovered/started) BEFORE `server` is constructed --
+// hence this free function runs ahead of GatewayTestHarness's member-init-list, and `shards` is
+// declared (and therefore initialized) before `server` below.
+inline runtime::ShardSet makeShardSet(const std::filesystem::path& root,
+                                      const std::vector<protocol::InstrumentId>& ids,
+                                      const BookConfig& cfg) {
+    runtime::ShardSet s;
+    for (protocol::InstrumentId id : ids) {
+        s.addShard(id, cfg, root, /*cpu=*/0);
+    }
+    return s;
+}
+
+// Spins up a full gateway (N shards -- default 1 -- + GatewayServer) bound to an OS-assigned
 // loopback port, running its io_context on a background thread. Torn down in the destructor.
 struct GatewayTestHarness {
-    std::filesystem::path journalDir;
-    ipc::SpscRing<ipc::Command> inRing;
-    runtime::MatchingThread<>::OutRing outRing;
-    runtime::MatchingThread<> matching;
-    sequencer::JournalWriter journal;
-    sequencer::Sequencer<ipc::SpscRing<ipc::Command>> seqr;
+    std::filesystem::path root;
+    runtime::ShardSet shards;
     asio::io_context io;
     AuthHandler auth;
     GatewayServer server;
     std::thread ioThread;
     unsigned short port = 0;
 
-    explicit GatewayTestHarness(const std::string& name, AuthHandler authIn = AuthHandler())
-        : journalDir(makeTempDir(name)),
-          matching(inRing, outRing, testConfig()),
-          journal(journalDir),
-          seqr(journal, inRing, 0),
+    explicit GatewayTestHarness(const std::string& name, AuthHandler authIn = AuthHandler(),
+                                std::vector<protocol::InstrumentId> instrumentIds = {1})
+        : root(makeTempDir(name)),
+          shards(makeShardSet(root, instrumentIds, testConfig())),
           auth(std::move(authIn)),
-          server(io, seqr, outRing, auth, 1, testConfig().minPrice, testConfig().maxPrice) {
-        matching.start();
+          server(io, shards, auth, testConfig().minPrice, testConfig().maxPrice) {
+        shards.recoverAndStartAll();
         server.listen(0);
         port = server.localPort();
         server.startRouter();
@@ -82,7 +91,7 @@ struct GatewayTestHarness {
         io.stop();
         if (ioThread.joinable()) ioThread.join();
         server.stopRouter();
-        matching.stop();
+        shards.stopAll();
     }
 };
 
@@ -90,8 +99,8 @@ struct GatewayTestHarness {
 // generous timeout so a protocol bug hangs the test instead of the process.
 class TestClient {
  public:
-    explicit TestClient(unsigned short port)
-        : socket_(io_), decoder_(1, 1 * kPriceScale, 10000 * kPriceScale) {
+    explicit TestClient(unsigned short port, protocol::InstrumentId instrumentId = 1)
+        : socket_(io_), decoder_(instrumentId, 1 * kPriceScale, 10000 * kPriceScale) {
         asio::ip::tcp::resolver resolver(io_);
         asio::connect(socket_, resolver.resolve("127.0.0.1", std::to_string(port)));
     }
@@ -111,11 +120,12 @@ class TestClient {
         return msg.type == protocol::MessageType::LoginAck;
     }
 
-    void sendNewOrder(std::uint64_t clientSeq, OrderId id, Side side, Price price, Quantity qty) {
+    void sendNewOrder(std::uint64_t clientSeq, OrderId id, Side side, Price price, Quantity qty,
+                      protocol::InstrumentId instrumentId = 1) {
         protocol::NewOrderMsg m{};
         m.clientSeqNum = clientSeq;
         m.orderId = id;
-        m.instrumentId = 1;
+        m.instrumentId = instrumentId;
         m.side = side;
         m.orderType = protocol::WireOrderType::Limit;
         m.price = price;

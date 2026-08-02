@@ -26,7 +26,7 @@ class GatewayServer;
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
  public:
     ClientSession(asio::ip::tcp::socket socket, GatewayServer& server,
-                  protocol::InstrumentId instrumentId, Price minPrice, Price maxPrice);
+                  protocol::InstrumentSet instruments, Price minPrice, Price maxPrice);
 
     void start();
 
@@ -61,7 +61,7 @@ class ClientSession : public std::enable_shared_from_this<ClientSession> {
     void handleCancel(const protocol::CancelMsg& m);
     void handleCancelReplace(const protocol::CancelReplaceMsg& m);
     void handleHeartbeat(const protocol::HeartbeatMsg& m);
-    void submitOrPend(const ipc::Command& cmd);
+    void submitOrPend(const ipc::Command& cmd, int shardIdx);
     void sendNewAckIfApplicable(const ipc::Command& cmd, Seq seq);
 
     // Client sequence check (FR-25). Returns true if `n` is the next expected sequence and the
@@ -101,10 +101,12 @@ class ClientSession : public std::enable_shared_from_this<ClientSession> {
 
     // The one command that hit RingFull, kept around for retryPending(). At most one at a time
     // -- reading is suspended the moment this is set, so no second command can arrive to
-    // clobber it.
+    // clobber it. Must be retried against ITS OWN shard's sequencer, not shard 0's -- hence
+    // pendingShardIdx_ travels with it.
     bool hasPending_ = false;
     ipc::CommandKind pendingKind_ = ipc::CommandKind::New;
     ipc::Command pendingCmd_{};
+    int pendingShardIdx_ = -1;
 
     asio::steady_timer authTimer_;
     asio::steady_timer heartbeatTimer_;

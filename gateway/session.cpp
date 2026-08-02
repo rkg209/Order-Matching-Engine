@@ -14,10 +14,10 @@ constexpr int kMaxMissedHeartbeats = 3;
 }  // namespace
 
 ClientSession::ClientSession(asio::ip::tcp::socket socket, GatewayServer& server,
-                             protocol::InstrumentId instrumentId, Price minPrice, Price maxPrice)
+                             protocol::InstrumentSet instruments, Price minPrice, Price maxPrice)
     : socket_(std::move(socket)),
       server_(server),
-      decoder_(instrumentId, minPrice, maxPrice),
+      decoder_(instruments, minPrice, maxPrice),
       authTimer_(socket_.get_executor()),
       heartbeatTimer_(socket_.get_executor()) {}
 
@@ -155,7 +155,7 @@ void ClientSession::handleLogin(const protocol::LoginMsg& m) {
     state_ = State::Authenticated;
     authTimer_.cancel();
 
-    protocol::LoginAckMsg ack{server_.sequencer().lastSeq(), 0};
+    protocol::LoginAckMsg ack{server_.loginAckSeq(), 0};
     std::byte buf[64];
     const std::size_t n = protocol::encodeLoginAck(ack, buf);
     sendFrame(buf, n);
@@ -189,6 +189,14 @@ void ClientSession::handleNewOrder(const protocol::NewOrderMsg& m) {
     if (!checkClientSeq(m.clientSeqNum, m.orderId)) {
         return;
     }
+    const int shardIdx = server_.shardIndexFor(m.instrumentId);
+    if (shardIdx < 0) {
+        // Unreachable by construction: the decoder already rejects unknown instruments
+        // (protocol::InstrumentSet::contains()) before a message reaches here. Treated
+        // defensively rather than asserted.
+        sendReject(m.orderId, protocol::RejectReason::EngineReject);
+        return;
+    }
 
     ipc::Command cmd{};
     cmd.id = m.orderId;
@@ -204,22 +212,32 @@ void ClientSession::handleNewOrder(const protocol::NewOrderMsg& m) {
                       : m.timeInForce == protocol::WireTimeInForce::Fok ? OrderType::Fok
                                                                         : OrderType::Limit);
 
-    submitOrPend(cmd);
+    submitOrPend(cmd, shardIdx);
 }
 
 void ClientSession::handleCancel(const protocol::CancelMsg& m) {
     if (!checkClientSeq(m.clientSeqNum, m.orderId)) {
         return;
     }
+    const int shardIdx = server_.shardIndexFor(m.instrumentId);
+    if (shardIdx < 0) {
+        sendReject(m.orderId, protocol::RejectReason::EngineReject);
+        return;
+    }
     ipc::Command cmd{};
     cmd.id = m.orderId;
     cmd.participant = participantId_;
     cmd.kind = ipc::CommandKind::Cancel;
-    submitOrPend(cmd);
+    submitOrPend(cmd, shardIdx);
 }
 
 void ClientSession::handleCancelReplace(const protocol::CancelReplaceMsg& m) {
     if (!checkClientSeq(m.clientSeqNum, m.orderId)) {
+        return;
+    }
+    const int shardIdx = server_.shardIndexFor(m.instrumentId);
+    if (shardIdx < 0) {
+        sendReject(m.orderId, protocol::RejectReason::EngineReject);
         return;
     }
     ipc::Command cmd{};
@@ -230,17 +248,18 @@ void ClientSession::handleCancelReplace(const protocol::CancelReplaceMsg& m) {
     cmd.participant = participantId_;
     cmd.kind = ipc::CommandKind::Replace;
     cmd.type = OrderType::Limit;
-    submitOrPend(cmd);
+    submitOrPend(cmd, shardIdx);
 }
 
 // Shared by NEW_ORDER/CANCEL/CANCEL_REPLACE: register the route BEFORE the ring is touched
 // (plan T3 -- no EXEC_REPORT for this order can arrive at the router before it knows where to
-// send it), then submit. RingFull suspends reading and keeps the command for retryPending()
-// instead of rejecting it -- backpressure must never drop an order (FR-28).
-void ClientSession::submitOrPend(const ipc::Command& cmd) {
-    server_.registerRoute(cmd.kind == ipc::CommandKind::Replace ? cmd.newId : cmd.id,
+// send it), then submit to the resolved shard's sequencer. RingFull suspends reading and keeps
+// the command (and its shard index) for retryPending() instead of rejecting it -- backpressure
+// must never drop an order (FR-28).
+void ClientSession::submitOrPend(const ipc::Command& cmd, int shardIdx) {
+    server_.registerRoute(shardIdx, cmd.kind == ipc::CommandKind::Replace ? cmd.newId : cmd.id,
                           shared_from_this(), lastClientSeq_);
-    const sequencer::TrySubmitResult r = server_.sequencer().trySubmit(cmd.kind, cmd);
+    const sequencer::TrySubmitResult r = server_.shardSequencer(shardIdx).trySubmit(cmd.kind, cmd);
     switch (r.outcome) {
         case sequencer::TrySubmitResult::Outcome::Sequenced:
             sendNewAckIfApplicable(cmd, r.seq);
@@ -249,11 +268,12 @@ void ClientSession::submitOrPend(const ipc::Command& cmd) {
             hasPending_ = true;
             pendingKind_ = cmd.kind;
             pendingCmd_ = cmd;
+            pendingShardIdx_ = shardIdx;
             stopReading();
             break;
         case sequencer::TrySubmitResult::Outcome::DurabilityFailure: {
             const OrderId routedId = cmd.kind == ipc::CommandKind::Replace ? cmd.newId : cmd.id;
-            server_.eraseRoute(routedId);
+            server_.eraseRoute(shardIdx, routedId);
             sendReject(routedId, protocol::RejectReason::EngineReject);
             closeSession();
             break;
@@ -265,7 +285,8 @@ void ClientSession::retryPending() {
     if (!hasPending_ || closed_) {
         return;
     }
-    const sequencer::TrySubmitResult r = server_.sequencer().trySubmit(pendingKind_, pendingCmd_);
+    const sequencer::TrySubmitResult r =
+        server_.shardSequencer(pendingShardIdx_).trySubmit(pendingKind_, pendingCmd_);
     if (r.outcome == sequencer::TrySubmitResult::Outcome::RingFull) {
         return;  // still full; wait for the next retry round
     }
@@ -273,7 +294,7 @@ void ClientSession::retryPending() {
     if (r.outcome == sequencer::TrySubmitResult::Outcome::DurabilityFailure) {
         const OrderId routedId =
             pendingCmd_.kind == ipc::CommandKind::Replace ? pendingCmd_.newId : pendingCmd_.id;
-        server_.eraseRoute(routedId);
+        server_.eraseRoute(pendingShardIdx_, routedId);
         sendReject(routedId, protocol::RejectReason::EngineReject);
         closeSession();
         return;

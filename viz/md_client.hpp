@@ -25,14 +25,22 @@ namespace velox::viz {
 
 class MdClient {
  public:
-    MdClient(asio::io_context& io, std::string host, std::string port)
+    // instrumentFilter: Spec 011 T5. 0 (default) means "no filter, take every instrument" -- the
+    // pre-Spec-011 single-instrument behavior. A nonzero value makes dispatch() ignore every
+    // message whose instrumentId does not match, which also keeps lastSeq_'s gap detection
+    // correct (feedSeq is per-instrument, per marketdata::Publisher::nextFeedSeq_ -- see
+    // marketdata/feed_messages.hpp's doc -- so it must only ever be advanced by one instrument's
+    // own sequence).
+    MdClient(asio::io_context& io, std::string host, std::string port,
+             protocol::InstrumentId instrumentFilter = 0)
         : io_(io),
           host_(std::move(host)),
           port_(std::move(port)),
           resolver_(io),
           socket_(io),
           reconnectTimer_(io),
-          backoff_(std::chrono::milliseconds(200)) {}
+          backoff_(std::chrono::milliseconds(200)),
+          instrumentFilter_(instrumentFilter) {}
 
     void start() { connect(); }
 
@@ -88,7 +96,31 @@ class MdClient {
         });
     }
 
+    // Instrument id every DecodedFeedMessage variant carries -- extracted once here so the
+    // filter guard in dispatch() below is a single check, not one per case.
+    static protocol::InstrumentId instrumentOf(const marketdata::DecodedFeedMessage& msg) {
+        switch (msg.type) {
+            case protocol::MessageType::SnapshotStart:
+                return msg.snapshotStart.instrumentId;
+            case protocol::MessageType::SnapshotEnd:
+                return msg.snapshotEnd.instrumentId;
+            case protocol::MessageType::L3Order:
+                return msg.l3Order.instrumentId;
+            case protocol::MessageType::L2Delta:
+                return msg.l2Delta.instrumentId;
+            case protocol::MessageType::TradeTick:
+                return msg.tradeTick.instrumentId;
+            case protocol::MessageType::L3Fill:
+                return msg.l3Fill.instrumentId;
+            default:
+                return 0;
+        }
+    }
+
     void dispatch(const marketdata::DecodedFeedMessage& msg) {
+        if (instrumentFilter_ != 0 && instrumentOf(msg) != instrumentFilter_) {
+            return;
+        }
         switch (msg.type) {
             case protocol::MessageType::SnapshotStart:
                 ladder_.onSnapshotStart();
@@ -146,6 +178,7 @@ class MdClient {
     Ladder ladder_;
     std::uint64_t lastSeq_ = 0;
     bool connected_ = false;
+    protocol::InstrumentId instrumentFilter_ = 0;
 };
 
 }  // namespace velox::viz

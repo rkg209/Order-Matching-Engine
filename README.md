@@ -105,6 +105,46 @@ It also runs from a **replayed journal** (`velox_loadgen --replay-journal=DIR --
 spawns the real binary twice and diffs the captured market-data stream. See
 `specs/010-live-visualizer/plan.md` for the design and the real bug this determinism test caught.
 
+## Multi-instrument sharding (Spec 011)
+
+CON-2 settles how this scales: the matching hot path is never threaded. Instead, scaling is
+**horizontal, by instrument** — N instruments, N fully independent single-threaded engines, N
+cores, nothing shared. Each shard (`runtime::Shard`) is the *entire* vertical slice from Specs
+001–008 — its own ring, matching thread, journal, snapshot thread, sequencer — so every guarantee
+the single-instrument engine had (determinism, isolation, recoverability) holds per shard, because
+each shard *is* that engine.
+
+```bash
+./build/apps/velox_gateway --journal=DIR --creds=FILE --port=9001 \
+    --instruments=1,2,3 --md-port=9002
+./build/apps/velox_viz --port=8080 --md=127.0.0.1:9002 --instrument=2   # one book at a time
+./scripts/shard_scaling.sh          # sweeps --shards=N, writes benchmarks/shard_scaling.csv
+```
+
+`tests/shard/isolation_test.cpp` proves the isolation mechanically: a shard jammed until its
+matching thread is spinning on a full outbound ring (`fullSpins() > 0`) never slows its neighbour's
+`processedCount()` or touches its book. `tests/shard/determinism_test.cpp` replays an existing
+golden scenario on one shard while a *different* scenario runs concurrently on another, and still
+gets a byte-identical match against the single-shard golden file.
+
+**Honest limits, stated rather than hidden (per the spec):**
+- **No cross-instrument atomicity.** There is no way to atomically trade one instrument against
+  another — no basket orders, no cross-instrument risk checks. A real exchange that needs that
+  uses a different architecture.
+- **Scaling is bounded by physical cores.** Past that you are time-slicing, and the tail latency
+  threading was avoided to protect comes back anyway. `velox_loadgen --shards=N` needs 3 threads
+  per shard (paced sender + pinned matching + reader) and prints `OVERSUBSCRIBED` once
+  `3N > hardware_concurrency`.
+- **This dev box has no core isolation** (`platform::supportsCoreIsolation()` is false on
+  macOS-arm64), so `scripts/shard_scaling.sh`'s curve is noisy here and only meaningful to
+  roughly N=3 before OS scheduling dominates the measurement — see `progress_report.md` for the
+  actual numbers measured on this hardware. The real curve belongs on the Linux benchmark target
+  with core isolation.
+- **Per-shard journal layout is a breaking change**: `<root>/journal` became
+  `<root>/shard-<id>/journal`. A pre-Spec-011 single-instrument journal must be moved to
+  `<root>/shard-1/` by hand — recovery from the old flat layout is deliberately not silently
+  supported.
+
 ## Build and run
 
 ```bash
@@ -117,6 +157,7 @@ ctest --test-dir build -L invariant     # randomized property tests (14 profiles
 ctest --test-dir build -L alloc_check   # must report 0 bytes/op
 ctest --test-dir build -L recovery      # journal/snapshot/sequencer + a real SIGKILL-and-recover
 ctest --test-dir build -L viz           # visualizer: handshake, ladder, zero-bytes, replay determinism
+ctest --test-dir build -L shard         # per-shard determinism + isolation (Spec 011)
 ./build/benchmark/velox_bench           # p50/p99/p999
 ./build/benchmark/velox_alloc_check     # must report 0 bytes/op
 ```

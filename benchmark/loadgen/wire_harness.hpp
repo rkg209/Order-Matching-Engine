@@ -24,9 +24,7 @@
 #include "protocol/decoder.hpp"
 #include "protocol/encoder.hpp"
 #include "protocol/messages.hpp"
-#include "runtime/matching_thread.hpp"
-#include "sequencer/journal_writer.hpp"
-#include "sequencer/sequencer.hpp"
+#include "runtime/shard.hpp"
 
 namespace velox::loadgen {
 
@@ -61,15 +59,21 @@ inline gateway::AuthHandler makeLoadgenAuth() {
     return auth;
 }
 
-// Spins up a full gateway (matching thread + journal + GatewayServer) bound to an OS-assigned
-// loopback port, running its io_context on a background thread. Torn down in the destructor.
+// GatewayServer's ctor snapshots the shard set's instrumentSet() once, so the single shard must
+// exist before `server` is constructed -- see tests/gateway/gateway_test_harness.hpp's identical
+// pattern, which this mirrors.
+inline runtime::ShardSet makeLoadgenShardSet(const std::filesystem::path& root) {
+    runtime::ShardSet s;
+    s.addShard(1, makeConfig(), root, /*cpu=*/0);
+    return s;
+}
+
+// Spins up a full gateway (one shard: matching thread + journal + GatewayServer) bound to an
+// OS-assigned loopback port, running its io_context on a background thread. Torn down in the
+// destructor.
 struct WireHarness {
-    std::filesystem::path journalDir;
-    ipc::SpscRing<ipc::Command> inRing;
-    runtime::MatchingThread<>::OutRing outRing;
-    runtime::MatchingThread<> matching;
-    sequencer::JournalWriter journal;
-    sequencer::Sequencer<ipc::SpscRing<ipc::Command>> seqr;
+    std::filesystem::path journalRoot;
+    runtime::ShardSet shards;
     asio::io_context io;
     gateway::AuthHandler auth;
     gateway::GatewayServer server;
@@ -77,13 +81,11 @@ struct WireHarness {
     unsigned short port = 0;
 
     WireHarness()
-        : journalDir(makeLoadgenTempDir("bench")),
-          matching(inRing, outRing, makeConfig()),
-          journal(journalDir),
-          seqr(journal, inRing, 0),
+        : journalRoot(makeLoadgenTempDir("bench")),
+          shards(makeLoadgenShardSet(journalRoot)),
           auth(makeLoadgenAuth()),
-          server(io, seqr, outRing, auth, 1, makeConfig().minPrice, makeConfig().maxPrice) {
-        matching.start();
+          server(io, shards, auth, makeConfig().minPrice, makeConfig().maxPrice) {
+        shards.recoverAndStartAll();
         server.listen(0);
         port = server.localPort();
         server.startRouter();
@@ -94,7 +96,7 @@ struct WireHarness {
         io.stop();
         if (ioThread.joinable()) ioThread.join();
         server.stopRouter();
-        matching.stop();
+        shards.stopAll();
     }
 };
 

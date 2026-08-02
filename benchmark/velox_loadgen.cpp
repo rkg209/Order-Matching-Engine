@@ -47,6 +47,10 @@ struct Args {
     long injectStallMs = 0;
     std::size_t injectStallAt = 0;
 
+    // Spec 011 T7: 0 means "not sharded" (the pre-existing single-path behavior below). >=1
+    // drives N independent EnginePath-equivalents instead -- see runSharded().
+    std::size_t shards = 0;
+
     // Spec 010 T3: the visualizer demo driver's flags. md-port/stats-port work with any of the
     // three --path= drivers that expose outRing() (today, just `engine` -- see paths.hpp);
     // replay-journal is its own mode entirely (runReplay(), below), always on the engine path.
@@ -88,6 +92,8 @@ Args parseArgs(int argc, char** argv) {
             a.injectStallMs = std::stol(tmp);
         } else if (takeArg(arg, "--inject-stall-at=", tmp)) {
             a.injectStallAt = std::stoull(tmp);
+        } else if (takeArg(arg, "--shards=", tmp)) {
+            a.shards = std::stoull(tmp);
         } else if (takeArg(arg, "--md-port=", tmp)) {
             a.mdPort = static_cast<unsigned short>(std::stoi(tmp));
         } else if (takeArg(arg, "--stats-port=", tmp)) {
@@ -221,13 +227,21 @@ RunResult run(Path& path, const Args& args, const std::string& scenarioName) {
     SteadyStateGenerator gen(workload, thinTopPrice());
     Schedule schedule(t0, intervalNs > 0 ? intervalNs : 1);
 
+    // Saturation mode (--rate=max) has no intended schedule to be coordinatedly-omitted
+    // against -- "as fast as possible" IS the intended send time, so intendedNs is set to
+    // actualSendNs (never 0) when saturating. Setting it to 0 would make correctedSpan =
+    // completeNs (time since t0, unrelated to this order's actual send time) and feed that huge,
+    // ever-growing span into hdr_record_corrected_value() with a 1ns interval below -- an
+    // O(span/interval) backfill per sample that turns a normal run into an effectively infinite
+    // one. CO-correction is meaningless without a target rate to miss; saturation mode's
+    // "corrected" histogram is therefore identical to its naive one, which is the honest answer.
     auto sendIndexed = [&](std::size_t i) {
         const OrderId id = nextId++;
-        const std::int64_t intendedNs = saturation ? 0 : schedule.intendedNs(i);
         if (!saturation) {
             Schedule::waitUntil(schedule.intendedTime(i));
         }
         const std::int64_t actualSendNs = nsSince(t0);
+        const std::int64_t intendedNs = saturation ? actualSendNs : schedule.intendedNs(i);
         inflight.recordSend(id, intendedNs, actualSendNs);
         ipc::Command cmd = gen.next(id);
         path.sendOne(cmd);
@@ -427,6 +441,160 @@ void runReplay(const Args& args) {
     path.stopReader();
 }
 
+// Spec 011 T7: --shards=N drives N fully independent EnginePath-equivalents (own ring, own
+// matching thread pinned to its own core, own reader thread, own id space starting at 1 -- ids
+// never collide because each shard has its own OrderBook/order-id map, exactly like N real
+// gateway shards would). Each shard's population/warmup/measured/drain sequence is
+// self-contained on its own thread; only `t0` and this function's aggregation step are shared,
+// so a slow shard cannot perturb another shard's measurement -- the mechanical point of the
+// isolation claim, reproduced here for the harness itself, not just runtime/shard.hpp.
+struct ShardRunResult {
+    std::size_t samples = 0;
+    double achievedRate = 0.0;
+    long long p50Ns = 0, p99Ns = 0, p999Ns = 0;
+};
+
+ShardRunResult runOneShard(const Args& args, Clock::time_point t0) {
+    const Workload workload = args.workload == "thin" ? Workload::Thin : Workload::Dense;
+    EnginePath path;
+
+    OrderId nextId = 1;
+    std::vector<ipc::Command> pop = populationCommands(workload, nextId);
+    for (const auto& c : pop) {
+        path.sendOne(c);
+    }
+    path.waitProcessed(pop.size());
+
+    const bool saturation = (args.rate == "max");
+    const std::int64_t intervalNs = saturation ? 0 : (1'000'000'000LL / std::stoll(args.rate));
+
+    InflightTable inflight;
+    LatencyRecorder recorder;
+    std::atomic<std::size_t> completed{0};
+
+    path.startReader(
+        [&](OrderId id, std::int64_t completeNs) {
+            inflight.recordComplete(id, completeNs);
+            completed.fetch_add(1, std::memory_order_relaxed);
+        },
+        t0);
+
+    SteadyStateGenerator gen(workload, thinTopPrice());
+    Schedule schedule(t0, intervalNs > 0 ? intervalNs : 1);
+
+    // See run()'s identical guard above: saturation mode has no schedule to be coordinatedly-
+    // omitted against, so intendedNs must be actualSendNs, never 0 -- 0 turns correctedSpan into
+    // an ever-growing "time since t0" fed at a 1ns interval into hdr_record_corrected_value(),
+    // which is an O(span/interval) hang, not a slow run.
+    auto sendIndexed = [&](std::size_t i) {
+        const OrderId id = nextId++;
+        if (!saturation) {
+            Schedule::waitUntil(schedule.intendedTime(i));
+        }
+        const std::int64_t actualSendNs = nsSince(t0);
+        const std::int64_t intendedNs = saturation ? actualSendNs : schedule.intendedNs(i);
+        inflight.recordSend(id, intendedNs, actualSendNs);
+        ipc::Command cmd = gen.next(id);
+        path.sendOne(cmd);
+    };
+
+    for (std::size_t i = 0; i < args.warmup; ++i) {
+        sendIndexed(i);
+    }
+
+    const OrderId measuredFirstId = nextId;
+    const auto measureStart = Clock::now();
+    for (std::size_t i = 0; i < args.samples; ++i) {
+        sendIndexed(args.warmup + i);
+    }
+    const auto measureSendEnd = Clock::now();
+
+    const std::size_t totalTracked = pop.size() + args.warmup + args.samples;
+    const auto drainDeadline =
+        Clock::now() + std::chrono::seconds(
+                           std::max<long long>(60, static_cast<long long>(totalTracked) / 50 + 10));
+    while (completed.load(std::memory_order_relaxed) < totalTracked &&
+           Clock::now() < drainDeadline) {
+        platform::cpuPause();
+    }
+    path.stopReader();
+
+    recordRange(recorder, inflight, measuredFirstId, args.samples, intervalNs > 0 ? intervalNs : 1);
+
+    ShardRunResult r;
+    r.samples = args.samples;
+    const double secs = std::chrono::duration<double>(measureSendEnd - measureStart).count();
+    r.achievedRate = secs > 0.0 ? static_cast<double>(args.samples) / secs : 0.0;
+    r.p50Ns = LatencyRecorder::percentile(recorder.corrected(), 50.0);
+    r.p99Ns = LatencyRecorder::percentile(recorder.corrected(), 99.0);
+    r.p999Ns =
+        args.samples >= 1'000'000 ? LatencyRecorder::percentile(recorder.corrected(), 99.9) : 0;
+    return r;
+}
+
+void runSharded(const Args& args) {
+    const std::size_t numShards = args.shards;
+
+    // 3 threads/shard: paced sender + pinned matching thread + reader thread (paths.hpp's doc).
+    // Honest limit stated in the output, not just in the plan: past roughly hardware_concurrency
+    // / 3 shards on a dev box, the curve measures the OS scheduler timeslicing real cores, not
+    // the engine's actual per-shard isolation -- see specs/011-multi-instrument/spec.md.
+    const unsigned hw = std::thread::hardware_concurrency();
+    const std::size_t threadsNeeded = numShards * 3;
+    const bool oversubscribed = hw > 0 && threadsNeeded > static_cast<std::size_t>(hw);
+
+    const auto t0 = Clock::now();
+    std::vector<ShardRunResult> results(numShards);
+    std::vector<std::thread> senders;
+    senders.reserve(numShards);
+    for (std::size_t i = 0; i < numShards; ++i) {
+        senders.emplace_back([&, i] { results[i] = runOneShard(args, t0); });
+    }
+    for (auto& t : senders) {
+        t.join();
+    }
+
+    double aggregateRate = 0.0;
+    long long worstP50 = 0, worstP99 = 0, worstP999 = 0;
+    for (const auto& r : results) {
+        aggregateRate += r.achievedRate;
+        worstP50 = std::max(worstP50, r.p50Ns);
+        worstP99 = std::max(worstP99, r.p99Ns);
+        worstP999 = std::max(worstP999, r.p999Ns);
+    }
+
+    std::printf("\n=== velox_loadgen: sharded engine path shards=%zu workload=%s ===\n", numShards,
+                args.workload.c_str());
+    std::printf("  threads needed:       %zu (3 per shard: sender + matching + reader)\n",
+                threadsNeeded);
+    std::printf("  hardware_concurrency: %u\n", hw);
+    if (oversubscribed) {
+        std::printf(
+            "  *** %zu threads on %u cores -- OVERSUBSCRIBED. Past this N the curve measures\n"
+            "      the scheduler, not the engine's per-shard isolation. ***\n",
+            threadsNeeded, hw);
+    }
+    std::printf("  aggregate achieved rate: %.0f /sec\n", aggregateRate);
+    std::printf("  worst-shard (max over N): p50 %8lld ns   p99 %8lld ns   p999 %s\n", worstP50,
+                worstP99,
+                args.samples >= 1'000'000 ? (std::to_string(worstP999) + " ns").c_str()
+                                          : "NOT REPORTED (need >= 1,000,000 samples)");
+    // Single grep-able line: scripts/shard_scaling.sh parses this rather than the prose above.
+    std::printf(
+        "SHARD_SCALING shards=%zu aggregate_ops_sec=%.0f worst_p50_ns=%lld worst_p99_ns=%lld "
+        "worst_p999_ns=%lld oversubscribed=%d\n",
+        numShards, aggregateRate, worstP50, worstP99, worstP999, oversubscribed ? 1 : 0);
+    std::printf("======================================================================\n\n");
+
+    if (!args.csvOut.empty()) {
+        std::ofstream f(args.csvOut);
+        f << "shards,aggregate_ops_sec,worst_shard_p50_ns,worst_shard_p99_ns,worst_shard_p999_"
+             "ns,oversubscribed\n";
+        f << numShards << "," << aggregateRate << "," << worstP50 << "," << worstP99 << ","
+          << worstP999 << "," << (oversubscribed ? 1 : 0) << "\n";
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -435,6 +603,16 @@ int main(int argc, char** argv) {
 
     if (!args.replayJournal.empty()) {
         runReplay(args);
+        return 0;
+    }
+
+    if (args.shards > 0) {
+        if (args.path != "engine") {
+            std::fprintf(stderr, "velox_loadgen: --shards requires --path=engine (got %s)\n",
+                         args.path.c_str());
+            return 2;
+        }
+        runSharded(args);
         return 0;
     }
 

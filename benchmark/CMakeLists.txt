@@ -39,3 +39,8 @@ set_tests_properties(bench_gate PROPERTIES LABELS "bench_gate")
 # engine path's p99 -- two velox_loadgen runs, with and without velox_viz + a WS client attached.
 add_test(NAME viz_decoupling COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/viz_decoupling.sh)
 set_tests_properties(viz_decoupling PROPERTIES LABELS "viz_decoupling" TIMEOUT 300)
+
+# Spec 011 T8 / DoD: measures (not asserts) that aggregate throughput scales with instrument
+# (shard) count -- sweeps velox_loadgen --shards=N and writes benchmarks/shard_scaling.csv.
+add_test(NAME shard_scaling COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/shard_scaling.sh)
+set_tests_properties(shard_scaling PROPERTIES LABELS "shard_scaling" TIMEOUT 600)

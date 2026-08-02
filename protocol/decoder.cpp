@@ -99,7 +99,7 @@ FrameDecoder::Result FrameDecoder::next(DecodedMessage& out, RejectReason& reaso
             m.orderType = static_cast<WireOrderType>(typeRaw);
             m.timeInForce = static_cast<WireTimeInForce>(tifRaw);
 
-            if (m.instrumentId != instrumentId_) {
+            if (!instruments_.contains(m.instrumentId)) {
                 return fail(RejectReason::UnknownInstrument, reason);
             }
             if (m.quantity <= 0) {
@@ -127,7 +127,7 @@ FrameDecoder::Result FrameDecoder::next(DecodedMessage& out, RejectReason& reaso
             m.clientSeqNum = wire::getU64(p);
             m.orderId = wire::getI64(p + 8);
             m.instrumentId = wire::getU32(p + 16);
-            if (m.instrumentId != instrumentId_) {
+            if (!instruments_.contains(m.instrumentId)) {
                 return fail(RejectReason::UnknownInstrument, reason);
             }
             out.type = type;
@@ -141,7 +141,7 @@ FrameDecoder::Result FrameDecoder::next(DecodedMessage& out, RejectReason& reaso
             m.instrumentId = wire::getU32(p + 16);
             m.newPrice = wire::getI64(p + 20);
             m.newQuantity = wire::getI64(p + 28);
-            if (m.instrumentId != instrumentId_) {
+            if (!instruments_.contains(m.instrumentId)) {
                 return fail(RejectReason::UnknownInstrument, reason);
             }
             if (m.newQuantity <= 0 || m.newPrice < minPrice_ || m.newPrice > maxPrice_) {
