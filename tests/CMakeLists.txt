@@ -111,6 +111,27 @@ target_link_libraries(velox_marketdata_tests PRIVATE velox_marketdata velox_engi
 target_include_directories(velox_marketdata_tests PRIVATE ${CMAKE_SOURCE_DIR})
 gtest_discover_tests(velox_marketdata_tests PROPERTIES LABELS "marketdata")
 
+# --- viz (Spec 010: the live visualizer) -------------------------------------------------------
+add_executable(velox_viz_tests
+    viz/ws_handshake_test.cpp
+    viz/ladder_test.cpp
+    viz/readonly_test.cpp
+)
+target_link_libraries(velox_viz_tests PRIVATE velox_viz_lib GTest::gtest_main Threads::Threads)
+target_include_directories(velox_viz_tests PRIVATE ${CMAKE_SOURCE_DIR})
+gtest_discover_tests(velox_viz_tests PROPERTIES LABELS "viz")
+
+# Spawns the real velox_loadgen binary twice against a fixture journal -- must be built first,
+# same pattern as velox_recover_sigkill_test / velox_gateway_e2e_test above.
+add_executable(velox_viz_replay_determinism_test viz/replay_determinism_test.cpp)
+target_link_libraries(velox_viz_replay_determinism_test PRIVATE velox_sequencer GTest::gtest_main)
+add_dependencies(velox_viz_replay_determinism_test velox_loadgen)
+target_compile_definitions(velox_viz_replay_determinism_test
+    PRIVATE VELOX_LOADGEN_BIN="$<TARGET_FILE:velox_loadgen>"
+)
+add_test(NAME Viz.ReplayDeterminism COMMAND velox_viz_replay_determinism_test)
+set_tests_properties(Viz.ReplayDeterminism PROPERTIES LABELS "viz" TIMEOUT 60)
+
 # --- bench (Spec 009: "test the test" -- the CO-correction proof) ----------------------------
 add_executable(velox_co_correction_test
     bench/co_correction_test.cpp

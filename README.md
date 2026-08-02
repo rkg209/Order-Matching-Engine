@@ -85,6 +85,26 @@ fsync-per-record dominated by construction (`FsyncPolicy::PerRecord` — see
 durable or wire-connected client actually experiences. Run `./build/benchmark/velox_loadgen
 --path=<path> --rate=<N> --samples=<N>` to reproduce; `/bench` runs and gates the `engine` scenario.
 
+## Live visualizer (Spec 010)
+
+A strictly read-only web app (`velox_viz`) renders the order book and the latency histogram live,
+fed over WebSocket from the market-data + latency streams. It is a pure downstream consumer — it
+never writes a byte toward the engine (verified at the socket level,
+`tests/viz/readonly_test.cpp`), and its decoupling from the matching hot path is *measured*, not
+asserted, by `scripts/viz_decoupling.sh`.
+
+```bash
+./build/benchmark/velox_loadgen --path=engine --rate=200000 --samples=20000000 \
+    --md-port=9001 --stats-port=9002 &
+./build/apps/velox_viz --port=8080 --md=127.0.0.1:9001 --stats=127.0.0.1:9002
+# open http://localhost:8080 — ladder animates, histogram updates ≥1×/sec
+```
+
+It also runs from a **replayed journal** (`velox_loadgen --replay-journal=DIR --start-on-subscriber
+--loop`), producing a byte-identical demo every time — `tests/viz/replay_determinism_test.cpp`
+spawns the real binary twice and diffs the captured market-data stream. See
+`specs/010-live-visualizer/plan.md` for the design and the real bug this determinism test caught.
+
 ## Build and run
 
 ```bash
@@ -96,6 +116,7 @@ ctest --test-dir build -L replay        # golden replay, byte-for-byte (21 scena
 ctest --test-dir build -L invariant     # randomized property tests (14 profiles)
 ctest --test-dir build -L alloc_check   # must report 0 bytes/op
 ctest --test-dir build -L recovery      # journal/snapshot/sequencer + a real SIGKILL-and-recover
+ctest --test-dir build -L viz           # visualizer: handshake, ladder, zero-bytes, replay determinism
 ./build/benchmark/velox_bench           # p50/p99/p999
 ./build/benchmark/velox_alloc_check     # must report 0 bytes/op
 ```

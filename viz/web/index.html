@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>velox — live matching engine</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header id="hdr">
+    <div class="brand">velox</div>
+    <div class="stat"><span class="label">feed</span><span id="conn" class="pill pill-down">connecting…</span></div>
+    <div class="stat"><span class="label">seq</span><span id="seq">0</span></div>
+    <div class="stat"><span class="label">trades/s</span><span id="tps">0.0</span></div>
+    <div class="stat"><span id="mode" class="pill pill-live">LIVE</span></div>
+  </header>
+
+  <main>
+    <section class="panel" id="ladder-panel">
+      <h2>order book</h2>
+      <canvas id="ladder" width="640" height="480"></canvas>
+    </section>
+    <section class="panel" id="hist-panel">
+      <h2>order-to-match latency</h2>
+      <canvas id="hist" width="640" height="480"></canvas>
+      <div class="hist-legend">
+        <span><i class="sw sw-p50"></i>p50</span>
+        <span><i class="sw sw-p99"></i>p99</span>
+        <span><i class="sw sw-p999"></i>p999</span>
+        <span><i class="sw sw-max"></i>max</span>
+        <span class="budget">budget: 2µs / 20µs / 100µs</span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

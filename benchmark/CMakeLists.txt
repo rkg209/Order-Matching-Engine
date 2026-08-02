@@ -34,3 +34,8 @@ set_tests_properties(alloc_check PROPERTIES LABELS "alloc_check")
 # (see .github/workflows/ci.yml).
 add_test(NAME bench_gate COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/bench_gate.sh)
 set_tests_properties(bench_gate PROPERTIES LABELS "bench_gate")
+
+# Spec 010 T8 / DoD: measures (not asserts) that attaching the visualizer does not regress the
+# engine path's p99 -- two velox_loadgen runs, with and without velox_viz + a WS client attached.
+add_test(NAME viz_decoupling COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/viz_decoupling.sh)
+set_tests_properties(viz_decoupling PROPERTIES LABELS "viz_decoupling" TIMEOUT 300)

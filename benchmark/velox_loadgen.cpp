@@ -15,17 +15,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "engine/order_book.hpp"
+#include "loadgen/demo_feed.hpp"
 #include "loadgen/inflight.hpp"
 #include "loadgen/latency_recorder.hpp"
 #include "loadgen/paths.hpp"
 #include "loadgen/schedule.hpp"
 #include "loadgen/workload.hpp"
 #include "platform/platform.hpp"
+#include "sequencer/journal_reader.hpp"
 
 using namespace velox;
 using namespace velox::loadgen;
@@ -43,6 +46,15 @@ struct Args {
     std::string csvOut;
     long injectStallMs = 0;
     std::size_t injectStallAt = 0;
+
+    // Spec 010 T3: the visualizer demo driver's flags. md-port/stats-port work with any of the
+    // three --path= drivers that expose outRing() (today, just `engine` -- see paths.hpp);
+    // replay-journal is its own mode entirely (runReplay(), below), always on the engine path.
+    unsigned short mdPort = 0;
+    unsigned short statsPort = 0;
+    std::string replayJournal;
+    bool startOnSubscriber = false;
+    bool loop = false;
 };
 
 bool takeArg(const std::string& arg, const std::string& key, std::string& out) {
@@ -76,6 +88,16 @@ Args parseArgs(int argc, char** argv) {
             a.injectStallMs = std::stol(tmp);
         } else if (takeArg(arg, "--inject-stall-at=", tmp)) {
             a.injectStallAt = std::stoull(tmp);
+        } else if (takeArg(arg, "--md-port=", tmp)) {
+            a.mdPort = static_cast<unsigned short>(std::stoi(tmp));
+        } else if (takeArg(arg, "--stats-port=", tmp)) {
+            a.statsPort = static_cast<unsigned short>(std::stoi(tmp));
+        } else if (takeArg(arg, "--replay-journal=", tmp)) {
+            a.replayJournal = tmp;
+        } else if (arg == "--start-on-subscriber") {
+            a.startOnSubscriber = true;
+        } else if (arg == "--loop") {
+            a.loop = true;
         }
     }
     return a;
@@ -159,6 +181,24 @@ RunResult run(Path& path, const Args& args, const std::string& scenarioName) {
     const bool saturation = (args.rate == "max");
     const std::int64_t intervalNs = saturation ? 0 : (1'000'000'000LL / std::stoll(args.rate));
 
+    // Spec 010 T3: the visualizer demo feed. Only EnginePath exposes outRing() (paths.hpp), so
+    // this is a no-op -- with a stderr note -- on --path=durable/wire.
+    std::unique_ptr<DemoFeed> demoFeed;
+    if (args.mdPort != 0 || args.statsPort != 0) {
+        if constexpr (requires { path.outRing(); }) {
+            demoFeed = std::make_unique<DemoFeed>(path.outRing(), args.mdPort, args.statsPort);
+        } else {
+            std::fprintf(stderr,
+                         "velox_loadgen: --md-port/--stats-port need --path=engine (got %s)\n",
+                         Path::kName);
+        }
+    }
+    if (args.startOnSubscriber && demoFeed) {
+        while (demoFeed->mdSubscribers() == 0) {
+            platform::cpuPause();
+        }
+    }
+
     InflightTable inflight;
     LatencyRecorder recorder;
     // Every OrderUpdate the reader observes increments this, population/warmup/measured alike --
@@ -171,6 +211,10 @@ RunResult run(Path& path, const Args& args, const std::string& scenarioName) {
         [&](OrderId id, std::int64_t completeNs) {
             inflight.recordComplete(id, completeNs);
             completed.fetch_add(1, std::memory_order_relaxed);
+            if (demoFeed) {
+                demoFeed->onComplete(completeNs - inflight.intendedNs(id),
+                                     intervalNs > 0 ? intervalNs : 1);
+            }
         },
         t0);
 
@@ -307,11 +351,92 @@ RunResult run(Path& path, const Args& args, const std::string& scenarioName) {
     return r;
 }
 
+// Spec 010 T3: the deterministic-demo mode -- replays a pre-recorded journal (instead of
+// SteadyStateGenerator's synthetic workload) at a paced rate, through the same EnginePath the
+// live demo uses, so a --md-port/--stats-port subscriber sees the identical book history every
+// run (FR-40). Always the engine path: a replayed demo has no reason to pay fsync/TCP cost, and
+// journal commands already carry the ids/prices that produced the recorded book, so this is
+// purely about REPLAYING them, not about exercising the durable/wire paths a second time.
+void runReplay(const Args& args) {
+    // Read the whole journal up front -- allocation happens here, in setup, never in the paced
+    // send loop below (same "never interleave setup cost with the measured/demo loop" discipline
+    // as InflightTable/LatencyRecorder's post-run pass).
+    sequencer::JournalReader reader(args.replayJournal);
+    std::vector<ipc::Command> commands;
+    for (;;) {
+        const sequencer::ReadResult r = reader.next();
+        if (r.status != sequencer::ReadStatus::Ok) {
+            break;  // EndOfJournal (expected), or TruncatedTail/Corrupt (stop at last good record)
+        }
+        commands.push_back(r.command);
+    }
+    if (commands.empty()) {
+        std::fprintf(stderr, "velox_loadgen: --replay-journal=%s produced no commands\n",
+                     args.replayJournal.c_str());
+        return;
+    }
+    std::printf("velox_loadgen: replaying %zu commands from %s\n", commands.size(),
+                args.replayJournal.c_str());
+
+    EnginePath path;
+    DemoFeed demoFeed(path.outRing(), args.mdPort, args.statsPort);
+
+    // FR-40: a subscriber must see the stream from record 0 every time -- so nothing is sent
+    // until at least one is connected, making the md byte stream byte-identical run to run.
+    if (args.startOnSubscriber) {
+        while (demoFeed.mdSubscribers() == 0) {
+            platform::cpuPause();
+        }
+    }
+
+    const bool saturation = (args.rate == "max");
+    const std::int64_t intervalNs = saturation ? 0 : (1'000'000'000LL / std::stoll(args.rate));
+
+    const auto t0 = Clock::now();
+    InflightTable inflight;
+    path.startReader(
+        [&](OrderId id, std::int64_t completeNs) {
+            demoFeed.onComplete(completeNs - inflight.intendedNs(id),
+                                intervalNs > 0 ? intervalNs : 1);
+        },
+        t0);
+
+    do {
+        Schedule schedule(Clock::now(), intervalNs > 0 ? intervalNs : 1);
+        for (std::size_t i = 0; i < commands.size(); ++i) {
+            if (!saturation) {
+                Schedule::waitUntil(schedule.intendedTime(i));
+            }
+            const std::int64_t intendedNs = schedule.intendedNs(i);
+            const std::int64_t actualSendNs = nsSince(t0);
+            // Replace's completion arrives keyed by newId, not the record's own `id` (the OLD
+            // id) -- see ipc/command.hpp. Recording under both keys keeps the live latency
+            // figure meaningful for Replace without needing a second correlation table.
+            inflight.recordSend(static_cast<std::uint64_t>(commands[i].id), intendedNs,
+                                actualSendNs);
+            if (commands[i].kind == ipc::CommandKind::Replace) {
+                inflight.recordSend(static_cast<std::uint64_t>(commands[i].newId), intendedNs,
+                                    actualSendNs);
+            }
+            path.sendOne(commands[i]);
+        }
+        std::printf("velox_loadgen: replay pass complete (%zu commands)\n", commands.size());
+        demoFeed.waitDrained();
+    } while (args.loop);
+
+    path.stopReader();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     platform::prefaultPages();
+
+    if (!args.replayJournal.empty()) {
+        runReplay(args);
+        return 0;
+    }
 
     const std::string scenario =
         args.path + "_" + args.workload + (args.rate == "max" ? "_max" : "_" + args.rate);

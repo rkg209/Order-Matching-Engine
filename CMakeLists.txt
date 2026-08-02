@@ -129,6 +129,20 @@ target_include_directories(velox_marketdata PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(velox_marketdata PUBLIC velox_protocol velox_sequencer velox_asio)
 
 # ---------------------------------------------------------------------------------------------
+# Live visualizer (Spec 010): a strictly read-only downstream consumer of velox_marketdata's wire
+# format, serving a browser ladder + latency histogram over a minimal hand-rolled WebSocket
+# server. Off the hot path entirely -- does not link velox_engine at all.
+# ---------------------------------------------------------------------------------------------
+add_library(velox_viz_lib
+    viz/ws_server.cpp
+)
+target_include_directories(velox_viz_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(velox_viz_lib PUBLIC velox_marketdata velox_asio)
+target_compile_definitions(velox_viz_lib PUBLIC
+    VELOX_VIZ_DEFAULT_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/viz/web"
+)
+
+# ---------------------------------------------------------------------------------------------
 # Tests. CTest labels are fixed by NFR-32: unit, replay, invariant, bench, alloc_check.
 # recovery (Spec 006) is a new label added to that set.
 # ---------------------------------------------------------------------------------------------

@@ -55,6 +55,7 @@ class EnginePath {
     static constexpr const char* kName = "engine";
     static constexpr bool kDurable = false;
     static constexpr bool kWire = false;
+    using OutRing = runtime::MatchingThread<>::OutRing;
 
     EnginePath() : matching_(inRing_, outRing_, makeConfig()) { matching_.start(); }
     ~EnginePath() {
@@ -92,6 +93,12 @@ class EnginePath {
         return poolExhaustedRejects_.load(std::memory_order_relaxed);
     }
 
+    // Spec 010 T3: the mechanical basis of the visualizer's decoupling claim. Consumer index 1
+    // is non-gating (bit clear in OutRing's GatingMask -- runtime/matching_thread.hpp), so a
+    // market-data publisher attached here can lap or not exist at all without ever stalling the
+    // matching thread reading via consumer 0 above.
+    OutRing& outRing() noexcept { return outRing_; }
+
  private:
     template<class OnComplete>
     void runReader(OnComplete& onComplete, Clock::time_point t0) {
@@ -123,8 +130,9 @@ class EnginePath {
         onComplete(ev.payload.orderUpdate.orderId, completeNs);
     }
 
+ private:
     ipc::SpscRing<ipc::Command> inRing_;
-    runtime::MatchingThread<>::OutRing outRing_;
+    OutRing outRing_;
     runtime::MatchingThread<> matching_;
     std::thread readerThread_;
     std::atomic<bool> readerStop_{false};

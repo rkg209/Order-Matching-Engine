@@ -151,6 +151,31 @@ class BookMirror {
         }
     }
 
+    // Spec 010 T1: the per-level sibling of forEachOrder -- a visualizer's ladder wants one row
+    // per price level (aggregate qty + order count), not one callback per resting order. Same
+    // canonical walk (bids best->worst then asks best->worst) so a caller that wants top-N just
+    // takes the first N callbacks per side. Folds levelTotal/levelOrderCount's logic inline while
+    // already iterating the level's deque, rather than calling back into levelTotalIn() per level
+    // (which would re-walk each level's orders a second time -- O(n^2) for a full-book walk).
+    // `f(Side, Price, Quantity total, std::uint32_t orders)`.
+    template<class F>
+    void forEachLevel(F&& f) const {
+        for (const auto& [price, orders] : bids_) {
+            Quantity total = 0;
+            for (const MirrorOrder& o : orders) {
+                total += o.remaining;
+            }
+            f(Side::Buy, price, total, static_cast<std::uint32_t>(orders.size()));
+        }
+        for (const auto& [price, orders] : asks_) {
+            Quantity total = 0;
+            for (const MirrorOrder& o : orders) {
+                total += o.remaining;
+            }
+            f(Side::Sell, price, total, static_cast<std::uint32_t>(orders.size()));
+        }
+    }
+
  private:
     using Levels = std::map<Price, std::deque<MirrorOrder>>;
     using BidLevels = std::map<Price, std::deque<MirrorOrder>, std::greater<Price>>;

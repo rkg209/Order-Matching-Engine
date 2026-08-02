@@ -1,0 +1,119 @@
+/* Spec 010 T6 -- plain CSS, no build step. Dark terminal aesthetic: this panel sits next to raw
+   latency numbers, so it should read as an instrument, not a marketing page. */
+
+:root {
+  --bg: #0b0e14;
+  --panel: #121722;
+  --border: #232b3a;
+  --text: #d7dee8;
+  --muted: #6b7688;
+  --bid: #2fbf71;
+  --bid-dim: #1a5c39;
+  --ask: #e0475a;
+  --ask-dim: #6e2530;
+  --accent: #4da3ff;
+  --p50: #4da3ff;
+  --p99: #f2b134;
+  --p999: #e0475a;
+  --max: #8b5cf6;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+header#hdr {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.stat { display: flex; gap: 6px; align-items: baseline; font-size: 13px; }
+.stat .label { color: var(--muted); }
+
+.pill {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.pill-up { background: rgba(47, 191, 113, 0.15); color: var(--bid); }
+.pill-down { background: rgba(224, 71, 90, 0.15); color: var(--ask); }
+.pill-live { background: rgba(77, 163, 255, 0.15); color: var(--accent); }
+.pill-stale { background: rgba(107, 118, 136, 0.2); color: var(--muted); }
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  padding: 14px;
+}
+
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.panel h2 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.panel.stale { opacity: 0.45; filter: grayscale(60%); }
+
+canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: #0d1119;
+  border-radius: 4px;
+}
+
+.hist-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.hist-legend .sw {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.sw-p50 { background: var(--p50); }
+.sw-p99 { background: var(--p99); }
+.sw-p999 { background: var(--p999); }
+.sw-max { background: var(--max); }
+.budget { margin-left: auto; }
